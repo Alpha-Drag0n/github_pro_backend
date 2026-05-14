@@ -17,6 +17,7 @@ const { initializeTokensFromDatabase } = require('./utils/tokenInitializer');
 const tokenRoutes = require('./routes/tokenRoutes');
 const searchRoutes = require('./routes/searchRoutes');
 const authRoutes = require('./routes/authRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 const setupSocketHandlers = require('./routes/socketRoutes');
 
 const app = express();
@@ -52,6 +53,7 @@ app.use(express.static(frontendBuildPath));
 app.use('/api', tokenRoutes);
 app.use('/api', searchRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
