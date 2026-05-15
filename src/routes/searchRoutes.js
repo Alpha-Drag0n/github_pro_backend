@@ -11,17 +11,48 @@ const Log = require('../models/logModel');
 const Logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 const TokenSelector = require('../services/tokenSelector');
+const SearchTokenPool = require('../services/searchTokenPool');
 const UserSearchService = require('../services/userSearchService');
 const EmailExtractorService = require('../services/emailExtractorService');
 
 const logger = new Logger();
 
 // Track running searches to support pause/resume
-const runningSearches = new Map(); // Map<searchId, { status, abortFlag }>
+const runningSearches = new Map(); // Map<searchId, { shouldPause, startedAt }>
 
+const MAX_CONCURRENT_SEARCHES = parseInt(process.env.MAX_CONCURRENT_SEARCHES || '3', 10);
 const TOKEN_ROTATION_DELAY_MS = 500;
 const TOKEN_STANDBY_POLL_MS = 30000;
 const TOKEN_FULL_CYCLE_COOLDOWN_MS = 60000;
+
+function getSearchComboLogFilter(search, combo) {
+  return {
+    location: combo.location,
+    year: combo.year,
+    followers: search.parameters.followers || '<30',
+    accountType: search.parameters.accountType || 'user',
+  };
+}
+
+function tryAcquireSearchWorker(searchId) {
+  if (runningSearches.has(searchId)) {
+    return { ok: false, reason: 'already_running' };
+  }
+  if (runningSearches.size >= MAX_CONCURRENT_SEARCHES) {
+    return {
+      ok: false,
+      reason: 'concurrency_limit',
+      message: `Maximum ${MAX_CONCURRENT_SEARCHES} concurrent searches allowed`,
+    };
+  }
+  runningSearches.set(searchId, { shouldPause: false, startedAt: Date.now() });
+  return { ok: true };
+}
+
+function releaseSearchWorker(searchId) {
+  runningSearches.delete(searchId);
+  SearchTokenPool.releaseTokenForSearch(searchId);
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,7 +73,7 @@ async function waitForAvailableToken(search, io) {
       return null;
     }
 
-    const first = await TokenSelector.selectFirstToken();
+    const first = await SearchTokenPool.assignTokenForSearch(search.searchId);
     if (first) {
       const doc = await Token.findById(first._id);
       if (doc) {
@@ -89,7 +120,10 @@ async function rotateSearchToken(search, searchService, emailExtractor, currentT
     await TokenSelector.markTokenError(currentTokenDoc._id, errorReason);
   }
 
-  let { token: nextMeta, fullCycle } = await TokenSelector.selectNextToken(currentTokenDoc?._id);
+  let { token: nextMeta, fullCycle } = await SearchTokenPool.selectNextTokenForSearch(
+    currentTokenDoc?._id,
+    search.searchId
+  );
 
   if (!nextMeta) {
     const waited = await waitForAvailableToken(search, io);
@@ -225,13 +259,19 @@ router.post('/searches/:id/execute', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    // Check if already running
-    if (search.status === 'running') {
+    if (search.status === 'running' || runningSearches.has(search.searchId)) {
       return res.status(400).json({ error: 'Search is already running' });
     }
 
-    // First token in stable createdAt order
-    selectedToken = await TokenSelector.selectFirstToken();
+    const workerSlot = tryAcquireSearchWorker(search.searchId);
+    if (!workerSlot.ok) {
+      const statusCode = workerSlot.reason === 'concurrency_limit' ? 429 : 400;
+      return res.status(statusCode).json({
+        error: workerSlot.message || 'Search is already executing',
+      });
+    }
+
+    selectedToken = await SearchTokenPool.assignTokenForSearch(search.searchId);
     if (!selectedToken) {
       search.status = 'awaiting_tokens';
       search.error =
@@ -250,12 +290,18 @@ router.post('/searches/:id/execute', async (req, res) => {
       return;
     }
 
-    // Update search with token info and status
+    const isFreshRun =
+      search.status === 'pending' &&
+      (!search.progress?.completedIndices || search.progress.completedIndices.length === 0);
+
     search.status = 'running';
-    search.startedAt = new Date();
+    search.startedAt = search.startedAt || new Date();
     search.tokenId = selectedToken._id;
     search.tokenName = selectedToken.name;
-    search.searchLog = [];
+    if (isFreshRun) {
+      search.searchLog = [];
+    }
+    search.error = null;
     await search.save();
 
     logger.info(`Search ${search.searchId} started with token: ${selectedToken.name}`);
@@ -274,6 +320,7 @@ router.post('/searches/:id/execute', async (req, res) => {
   } catch (error) {
     logger.error(`Error executing search: ${error.message}`);
     if (search) {
+      releaseSearchWorker(search.searchId);
       search.status = 'failed';
       search.error = error.message;
       await search.save();
@@ -288,11 +335,23 @@ router.post('/searches/:id/execute', async (req, res) => {
 async function executeSearchInBackground(search, selectedToken, io) {
   const startTime = Date.now();
   let currentCombination = 0;
+  const searchId = search.searchId;
+
+  if (!runningSearches.has(searchId)) {
+    const acquired = tryAcquireSearchWorker(searchId);
+    if (!acquired.ok) {
+      logger.warn(`Could not start worker for ${searchId}: ${acquired.reason}`);
+      return;
+    }
+  } else {
+    const state = runningSearches.get(searchId);
+    if (state) {
+      state.shouldPause = false;
+    }
+  }
 
   try {
-    // Register this search as running
-    runningSearches.set(search.searchId, { status: 'running', shouldPause: false });
-    logger.info(`Search ${search.searchId} registered in running searches`);
+    logger.info(`Search ${searchId} worker started (${runningSearches.size} active)`);
 
     let token = selectedToken ? await Token.findById(selectedToken._id) : null;
     if (!token) {
@@ -300,7 +359,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
       if (!token) {
         search.status = 'paused';
         await search.save();
-        runningSearches.delete(search.searchId);
+        releaseSearchWorker(searchId);
         return;
       }
     }
@@ -345,10 +404,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
       try {
         // Check if this combination is already logged (already searched)
-        const existingLog = await Log.findOne({
-          location: combo.location,
-          year: combo.year,
-        });
+        const existingLog = await Log.findOne(getSearchComboLogFilter(search, combo));
 
         if (existingLog) {
           logger.info(`Skipping ${combo.location} ${combo.year} - already searched on ${existingLog.completedAt}`);
@@ -494,15 +550,16 @@ async function executeSearchInBackground(search, selectedToken, io) {
           }
         }
 
-        // Create log entry for this combination
-        await Log.create({
-          searchId: search.searchId,
-          location: combo.location,
-          year: combo.year,
-          usersFound: users.length,
-          status: 'completed',
-          completedAt: new Date(),
-        });
+        await Log.findOneAndUpdate(
+          getSearchComboLogFilter(search, combo),
+          {
+            searchId: search.searchId,
+            usersFound: users.length,
+            status: 'completed',
+            completedAt: new Date(),
+          },
+          { upsert: true }
+        );
 
         // Update search log
         search.searchLog.push({
@@ -597,8 +654,8 @@ async function executeSearchInBackground(search, selectedToken, io) {
     if (loopState?.shouldPause) {
       search.status = 'paused';
       await search.save();
-      runningSearches.delete(search.searchId);
-      logger.info(`Search ${search.searchId} paused at ${search.progress.percentage}%`);
+      releaseSearchWorker(searchId);
+      logger.info(`Search ${searchId} paused at ${search.progress.percentage}%`);
       return;
     }
 
@@ -631,16 +688,15 @@ async function executeSearchInBackground(search, selectedToken, io) {
       });
     }
 
-    // Clean up from running searches
-    runningSearches.delete(search.searchId);
+    releaseSearchWorker(searchId);
   } catch (error) {
     logger.error(`Search execution error: ${error.message}`);
 
-    const paused = runningSearches.get(search.searchId)?.shouldPause;
+    const paused = runningSearches.get(searchId)?.shouldPause;
     if (paused) {
       search.status = 'paused';
       await search.save();
-      runningSearches.delete(search.searchId);
+      releaseSearchWorker(searchId);
       return;
     }
 
@@ -651,13 +707,19 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
       if (io) {
         io.emit('search:awaiting_tokens', {
-          searchId: search.searchId,
+          searchId,
           message: search.error,
         });
       }
 
-      runningSearches.delete(search.searchId);
-      executeSearchInBackground(search, null, io);
+      releaseSearchWorker(searchId);
+      const fresh = await Search.findOne({ searchId });
+      if (fresh && !runningSearches.has(searchId)) {
+        const acquired = tryAcquireSearchWorker(searchId);
+        if (acquired.ok) {
+          executeSearchInBackground(fresh, null, io);
+        }
+      }
       return;
     }
 
@@ -669,13 +731,13 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
     if (io) {
       io.emit('search:failed', {
-        searchId: search.searchId,
+        searchId,
         status: 'failed',
         error: error.message,
       });
     }
 
-    runningSearches.delete(search.searchId);
+    releaseSearchWorker(searchId);
   }
 }
 
@@ -787,6 +849,14 @@ router.delete('/searches/:id', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
+    if (runningSearches.has(search.searchId)) {
+      const state = runningSearches.get(search.searchId);
+      if (state) {
+        state.shouldPause = true;
+      }
+      releaseSearchWorker(search.searchId);
+    }
+
     // Delete all users for this search
     const userDeleteResult = await User.deleteMany({ searchId: search.searchId });
     logger.info(`Deleted ${userDeleteResult.deletedCount} users for search ${search.searchId}`);
@@ -865,9 +935,21 @@ router.post('/searches/:id/resume', async (req, res) => {
       });
     }
 
+    if (runningSearches.has(search.searchId)) {
+      return res.status(400).json({ error: 'Search is already running' });
+    }
+
+    const workerSlot = tryAcquireSearchWorker(search.searchId);
+    if (!workerSlot.ok) {
+      const statusCode = workerSlot.reason === 'concurrency_limit' ? 429 : 400;
+      return res.status(statusCode).json({
+        error: workerSlot.message || 'Search is already executing',
+      });
+    }
+
     const previousStatus = search.status;
 
-    let selectedToken = await TokenSelector.selectFirstToken();
+    let selectedToken = await SearchTokenPool.assignTokenForSearch(search.searchId);
     if (!selectedToken) {
       search.status = 'awaiting_tokens';
       search.error = 'No GitHub tokens yet — will resume when a token is available';
@@ -906,6 +988,7 @@ router.post('/searches/:id/resume', async (req, res) => {
     });
   } catch (error) {
     logger.error(`Error resuming search: ${error.message}`);
+    releaseSearchWorker(req.params.id);
     res.status(500).json({ error: 'Failed to resume search' });
   }
 });
@@ -988,15 +1071,26 @@ router.get('/logs', async (req, res) => {
 router.get('/logs/location/:location/year/:year', async (req, res) => {
   try {
     const { location, year } = req.params;
+    const { followers, accountType } = req.query;
 
-    const logs = await Log.find({
-      location: location,
+    const filter = {
+      location,
       year: parseInt(year),
-    }).sort({ completedAt: -1 });
+    };
+    if (followers) {
+      filter.followers = followers;
+    }
+    if (accountType) {
+      filter.accountType = accountType;
+    }
+
+    const logs = await Log.find(filter).sort({ completedAt: -1 });
 
     res.json({
       location,
       year: parseInt(year),
+      followers: followers || null,
+      accountType: accountType || null,
       searchCount: logs.length,
       logs,
     });
@@ -1034,11 +1128,20 @@ router.get('/logs/search/:searchId', async (req, res) => {
 router.delete('/logs/location/:location/year/:year', async (req, res) => {
   try {
     const { location, year } = req.params;
+    const { followers, accountType } = req.query;
 
-    const result = await Log.deleteMany({
-      location: location,
+    const filter = {
+      location,
       year: parseInt(year),
-    });
+    };
+    if (followers) {
+      filter.followers = followers;
+    }
+    if (accountType) {
+      filter.accountType = accountType;
+    }
+
+    const result = await Log.deleteMany(filter);
 
     logger.info(`Deleted ${result.deletedCount} log entries for ${location} ${year}`);
 
@@ -1046,6 +1149,8 @@ router.delete('/logs/location/:location/year/:year', async (req, res) => {
       message: 'Log entries deleted successfully',
       location,
       year: parseInt(year),
+      followers: followers || null,
+      accountType: accountType || null,
       deletedCount: result.deletedCount,
     });
   } catch (error) {

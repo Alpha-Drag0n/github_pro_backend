@@ -1,6 +1,6 @@
 /**
  * Search Log Model
- * Stores completed location-year combinations to avoid duplicate searches
+ * Tracks completed location-year-followers-accountType combinations to avoid duplicate API work.
  */
 
 const mongoose = require('mongoose');
@@ -18,6 +18,16 @@ const logSchema = new mongoose.Schema({
   year: {
     type: Number,
     required: true,
+  },
+  followers: {
+    type: String,
+    required: true,
+    default: '<30',
+  },
+  accountType: {
+    type: String,
+    required: true,
+    default: 'user',
   },
   usersFound: {
     type: Number,
@@ -39,8 +49,11 @@ const logSchema = new mongoose.Schema({
   },
 });
 
-// Create indexes for fast lookup
-logSchema.index({ searchId: 1, location: 1, year: 1 }, { unique: true });
-logSchema.index({ location: 1, year: 1 });
+// One log per unique search combination (global dedup for re-runs)
+logSchema.index(
+  { location: 1, year: 1, followers: 1, accountType: 1 },
+  { unique: true }
+);
+logSchema.index({ searchId: 1, completedAt: -1 });
 
 module.exports = mongoose.model('Log', logSchema);

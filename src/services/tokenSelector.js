@@ -111,25 +111,34 @@ async function getAllAvailableTokens() {
  */
 async function updateTokenUsage(tokenId, requestsUsed = 1) {
   try {
-    const token = await Token.findById(tokenId);
+    const updated = await Token.findOneAndUpdate(
+      { _id: tokenId },
+      [
+        {
+          $set: {
+            lastUsed: new Date(),
+            usageCount: { $add: [{ $ifNull: ['$usageCount', 0] }, 1] },
+            successCount: { $add: [{ $ifNull: ['$successCount', 0] }, 1] },
+            requestsRemaining: {
+              $max: [0, { $subtract: [{ $ifNull: ['$requestsRemaining', 0] }, requestsUsed] }],
+            },
+          },
+        },
+      ],
+      { new: true }
+    );
 
-    if (!token) {
+    if (!updated) {
       logger.warn(`Token not found for update: ${tokenId}`);
       return false;
     }
 
-    token.lastUsed = new Date();
-    token.successCount += 1;
-    token.usageCount += 1;
-    token.requestsRemaining = Math.max(0, token.requestsRemaining - requestsUsed);
-
-    if (token.requestsRemaining <= 0) {
+    if (updated.requestsRemaining <= 0) {
       logger.warn(
-        `Token rate limited: ${token.name} (${token.requestsRemaining}/${token.requestsLimit})`
+        `Token rate limited: ${updated.name} (${updated.requestsRemaining}/${updated.requestsLimit})`
       );
     }
 
-    await token.save();
     return true;
   } catch (error) {
     logger.error(`Error updating token usage: ${error.message}`);

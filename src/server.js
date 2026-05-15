@@ -20,6 +20,7 @@ const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const healthRoutes = require('./routes/healthRoutes');
 const { authenticate } = require('./middleware/authMiddleware');
+const socketAuthMiddleware = require('./middleware/socketAuthMiddleware');
 const setupSocketHandlers = require('./routes/socketRoutes');
 
 const app = express();
@@ -74,7 +75,9 @@ app.get('*', (req, res) => {
   });
 });
 
-// WebSocket Connection Handler
+// WebSocket — require JWT (same as HTTP API)
+io.use(socketAuthMiddleware);
+
 io.on('connection', (socket) => {
   logger.info(`User connected: ${socket.id}`);
 
@@ -97,7 +100,6 @@ app.use((err, req, res, next) => {
   logger.error(`Server error: ${err.message}`);
   res.status(500).json({
     error: 'Internal server error',
-    message: err.message,
   });
 });
 
