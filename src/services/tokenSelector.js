@@ -23,9 +23,9 @@ async function selectBestToken() {
   try {
     // Find all potentially usable tokens
     const tokens = await Token.find({
-      isActive: true,
-      status: { $in: ['active', 'rate_limited'] },
-      requestsRemaining: { $gt: 0 },
+      // isActive: true,
+      // status: { $in: ['active', 'rate_limited'] },
+      // requestsRemaining: { $gt: 0 },
     }).sort({
       lastUsed: 1, // Least recently used first (load balancing)
     });
@@ -90,8 +90,8 @@ async function getTokenById(tokenId) {
 async function getAllAvailableTokens() {
   try {
     const tokens = await Token.find({
-      isActive: true,
-      status: { $in: ['active', 'rate_limited'] },
+      // isActive: true,
+      // status: { $in: ['active', 'rate_limited'] },
     })
       .select('-token') // Don't return the actual token value
       .sort({ lastUsed: 1 });
