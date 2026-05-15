@@ -15,9 +15,7 @@ const logger = new Logger();
  * 1. Token must be active (isActive: true)
  * 2. Token must have healthy status (not 'invalid' or 'expired')
  * 3. Token must have requests remaining
- * 4. Prioritize higher priority tokens
- * 5. Prioritize tokens with more requests remaining
- * 6. Prioritize tokens used least recently (load balancing)
+ * 4. Select token used least recently (load balancing - PRIMARY)
  *
  * @returns {Object|null} Token document or null if no tokens available
  */
@@ -29,9 +27,7 @@ async function selectBestToken() {
       status: { $in: ['active', 'rate_limited'] },
       requestsRemaining: { $gt: 0 },
     }).sort({
-      priority: -1, // Higher priority first
-      requestsRemaining: -1, // More requests first
-      lastUsed: 1, // Least recently used first
+      lastUsed: 1, // Least recently used first (load balancing)
     });
 
     if (tokens.length === 0) {
@@ -41,7 +37,7 @@ async function selectBestToken() {
 
     const selectedToken = tokens[0];
     logger.info(
-      `Selected token: ${selectedToken.name} (${selectedToken.requestsRemaining}/${selectedToken.requestsLimit} requests)`
+      `Selected token: ${selectedToken.name} (${selectedToken.requestsRemaining}/${selectedToken.requestsLimit} requests, lastUsed: ${selectedToken.lastUsed || 'never'})`
     );
 
     return selectedToken;
@@ -98,7 +94,7 @@ async function getAllAvailableTokens() {
       status: { $in: ['active', 'rate_limited'] },
     })
       .select('-token') // Don't return the actual token value
-      .sort({ priority: -1, requestsRemaining: -1 });
+      .sort({ lastUsed: 1 });
 
     return tokens;
   } catch (error) {
