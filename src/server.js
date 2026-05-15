@@ -18,6 +18,8 @@ const tokenRoutes = require('./routes/tokenRoutes');
 const searchRoutes = require('./routes/searchRoutes');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const healthRoutes = require('./routes/healthRoutes');
+const { authenticate } = require('./middleware/authMiddleware');
 const setupSocketHandlers = require('./routes/socketRoutes');
 
 const app = express();
@@ -49,20 +51,18 @@ app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 const frontendBuildPath = path.join(__dirname, '../../frontend/dist');
 app.use(express.static(frontendBuildPath));
 
-// API Routes
-app.use('/api', tokenRoutes);
-app.use('/api', searchRoutes);
+// Public health check (no auth)
+app.use('/health', healthRoutes);
+
+// Auth routes (signup/signin public; rest protected per-route)
 app.use('/api/auth', authRoutes);
+
+// Admin routes (protected per-route)
 app.use('/api/admin', adminRoutes);
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    mongoConnected: Database.isConnected(),
-  });
-});
+// Protected API routes
+app.use('/api', authenticate, tokenRoutes);
+app.use('/api', authenticate, searchRoutes);
 
 // Serve frontend for all non-API routes (client-side routing)
 app.get('*', (req, res) => {
@@ -131,6 +131,7 @@ async function startServer() {
       logger.info(`Web UI available at http://localhost:${PORT}`);
       logger.info(`WebSocket support enabled`);
       logger.info(`API Endpoints:`);
+      logger.info(`  GET    /health                  - Service health check (public)`);
       logger.info(`  POST   /api/tokens              - Add new token`);
       logger.info(`  GET    /api/tokens              - List all tokens`);
       logger.info(`  DELETE /api/tokens/:id          - Delete token`);
