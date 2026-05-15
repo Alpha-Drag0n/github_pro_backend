@@ -242,6 +242,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               combo.location,
               combo.startDate,
               combo.endDate,
+              search.parameters.followers || '<30',
               search.parameters.accountType,
               100
             )
