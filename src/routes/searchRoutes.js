@@ -702,6 +702,7 @@ router.post('/searches/:id/pause', async (req, res) => {
 /**
  * Resume search
  * POST /api/searches/:id/resume
+ * Can resume both paused and failed searches
  */
 router.post('/searches/:id/resume', async (req, res) => {
   try {
@@ -710,8 +711,8 @@ router.post('/searches/:id/resume', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    if (search.status !== 'paused') {
-      return res.status(400).json({ error: 'Can only resume paused searches' });
+    if (search.status !== 'paused' && search.status !== 'failed') {
+      return res.status(400).json({ error: 'Can only resume paused or failed searches' });
     }
 
     // Select best available token
@@ -724,9 +725,11 @@ router.post('/searches/:id/resume', async (req, res) => {
     search.resumedAt = new Date();
     search.tokenId = selectedToken._id;
     search.tokenName = selectedToken.name;
+    search.error = null; // Clear error if resuming a failed search
     await search.save();
 
-    logger.info(`Search resumed: ${search.searchId} with token: ${selectedToken.name}`);
+    const previousStatus = search.status === 'failed' ? 'failed' : 'paused';
+    logger.info(`Search resumed from ${previousStatus} status: ${search.searchId} with token: ${selectedToken.name}`);
 
     // Execute search in background
     executeSearchInBackground(search, selectedToken, req.io);
@@ -736,7 +739,7 @@ router.post('/searches/:id/resume', async (req, res) => {
       searchId: search.searchId,
       status: search.status,
       tokenName: selectedToken.name,
-      message: 'Search resumed successfully',
+      message: `Search resumed successfully from ${previousStatus} status`,
     });
   } catch (error) {
     logger.error(`Error resuming search: ${error.message}`);
