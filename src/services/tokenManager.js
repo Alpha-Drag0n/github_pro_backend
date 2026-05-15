@@ -117,7 +117,7 @@ class TokenManager {
     const currentToken = this.getCurrentToken();
 
     if (currentToken) {
-      currentToken.status = 'rate_limited';
+      // currentToken.status = 'rate_limited';
       await currentToken.save();
     }
 
@@ -171,7 +171,7 @@ class TokenManager {
       token.lastChecked = new Date();
 
       if (rateLimit.remaining === 0) {
-        token.status = 'rate_limited';
+        // token.status = 'rate_limited';
       } else if (token.status === 'rate_limited') {
         token.status = 'active';
       }
@@ -195,8 +195,8 @@ class TokenManager {
         const isValid = await this.verifyToken(token.token);
 
         if (!isValid) {
-          token.status = 'invalid';
-          token.isActive = false;
+          // token.status = 'invalid';
+          // token.isActive = false;
           token.failureReason = 'Token verification failed';
         } else {
           await this.updateRateLimit(token);
@@ -222,10 +222,10 @@ class TokenManager {
       token.errorCount += 1;
 
       if (error.response?.status === 401) {
-        token.status = 'expired';
+        // token.status = 'expired';
         token.failureReason = 'Unauthorized (401)';
       } else if (error.response?.status === 403) {
-        token.status = 'rate_limited';
+        // token.status = 'rate_limited';
         token.failureReason = 'Forbidden (403) - Rate limited';
       }
 

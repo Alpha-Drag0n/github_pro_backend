@@ -125,7 +125,7 @@ async function updateTokenUsage(tokenId, requestsUsed = 1) {
 
     // If no requests left, mark as rate limited
     if (token.requestsRemaining <= 0) {
-      token.status = 'rate_limited';
+      // token.status = 'rate_limited';
       logger.warn(
         `Token rate limited: ${token.name} (${token.requestsRemaining}/${token.requestsLimit})`
       );
@@ -160,14 +160,14 @@ async function markTokenError(tokenId, errorReason) {
 
     // Mark as invalid if authentication fails
     if (errorReason.includes('401') || errorReason.includes('authentication')) {
-      token.status = 'invalid';
-      token.isActive = false;
+      // token.status = 'invalid';
+      // token.isActive = false;
       logger.error(`Token marked as invalid: ${token.name}`);
     }
     // Mark as expired if token is revoked
     else if (errorReason.includes('403') || errorReason.includes('revoked')) {
-      token.status = 'expired';
-      token.isActive = false;
+      // token.status = 'expired';
+      // token.isActive = false;
       logger.error(`Token marked as expired: ${token.name}`);
     }
 

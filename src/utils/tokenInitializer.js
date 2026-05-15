@@ -50,7 +50,7 @@ async function initializeTokensFromDatabase() {
           results.push({
             id: tokenDoc._id,
             name: tokenDoc.name,
-            status: 'invalid',
+            // status: 'invalid',
           });
         }
       } catch (error) {
@@ -85,7 +85,7 @@ async function verifyAndUpdateToken(tokenDoc) {
     const user = await client.getAuthenticatedUser();
 
     if (!user) {
-      tokenDoc.status = 'invalid';
+      // tokenDoc.status = 'invalid';
       tokenDoc.failureReason = 'Failed to authenticate with GitHub API';
       await tokenDoc.save();
       return null;
@@ -143,13 +143,13 @@ async function checkAllTokenHealth() {
           healthy: true,
         });
       } catch (error) {
-        token.status = 'invalid';
+        // token.status = 'invalid';
         token.failureReason = error.message;
         await token.save();
         results.push({
           id: token._id,
           name: token.name,
-          status: 'invalid',
+          // status: 'invalid',
           healthy: false,
           error: error.message,
         });

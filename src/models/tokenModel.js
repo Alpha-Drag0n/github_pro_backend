@@ -29,7 +29,8 @@ const tokenSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['active', 'expired', 'invalid', 'rate_limited'],
+    // enum: ['active', 'expired', 'invalid', 'rate_limited'],
+    enum: ['active'],
     default: 'active',
   },
   isActive: {
