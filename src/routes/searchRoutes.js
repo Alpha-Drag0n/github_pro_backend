@@ -19,6 +19,124 @@ const logger = new Logger();
 // Track running searches to support pause/resume
 const runningSearches = new Map(); // Map<searchId, { status, abortFlag }>
 
+const TOKEN_ROTATION_DELAY_MS = 500;
+const TOKEN_STANDBY_POLL_MS = 30000;
+const TOKEN_FULL_CYCLE_COOLDOWN_MS = 60000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isGitHubTokenError(error) {
+  const status = error?.response?.status;
+  return status === 401 || status === 403;
+}
+
+/**
+ * Poll until a token exists or the search is paused.
+ */
+async function waitForAvailableToken(search, io) {
+  while (true) {
+    const state = runningSearches.get(search.searchId);
+    if (state?.shouldPause) {
+      return null;
+    }
+
+    const first = await TokenSelector.selectFirstToken();
+    if (first) {
+      const doc = await Token.findById(first._id);
+      if (doc) {
+        if (search.status === 'awaiting_tokens') {
+          search.status = 'running';
+          search.error = null;
+          search.tokenId = doc._id;
+          search.tokenName = doc.name;
+          await search.save();
+          if (io) {
+            io.emit('search:token:available', {
+              searchId: search.searchId,
+              tokenName: doc.name,
+            });
+          }
+        }
+        return doc;
+      }
+    }
+
+    search.status = 'awaiting_tokens';
+    search.error = 'Waiting for a GitHub token — will retry automatically';
+    await search.save();
+
+    if (io) {
+      io.emit('search:awaiting_tokens', {
+        searchId: search.searchId,
+        message: search.error,
+      });
+    }
+
+    logger.info(
+      `Search ${search.searchId} awaiting tokens — polling again in ${TOKEN_STANDBY_POLL_MS / 1000}s`
+    );
+    await sleep(TOKEN_STANDBY_POLL_MS);
+  }
+}
+
+/**
+ * Advance to the next token in createdAt order; keeps rotating instead of failing the search.
+ */
+async function rotateSearchToken(search, searchService, emailExtractor, currentTokenDoc, io, errorReason) {
+  if (currentTokenDoc?._id) {
+    await TokenSelector.markTokenError(currentTokenDoc._id, errorReason);
+  }
+
+  let { token: nextMeta, fullCycle } = await TokenSelector.selectNextToken(currentTokenDoc?._id);
+
+  if (!nextMeta) {
+    const waited = await waitForAvailableToken(search, io);
+    if (!waited) {
+      return null;
+    }
+    nextMeta = waited;
+    fullCycle = false;
+  }
+
+  if (fullCycle) {
+    logger.info(`Full token rotation cycle for search ${search.searchId} — cooling down before retry`);
+    await sleep(TOKEN_FULL_CYCLE_COOLDOWN_MS);
+  } else {
+    await sleep(TOKEN_ROTATION_DELAY_MS);
+  }
+
+  const nextTokenDoc = await Token.findById(nextMeta._id);
+  const GitHubClient = require('../api/githubClient');
+
+  searchService.currentToken = nextTokenDoc.token;
+  searchService.currentTokenId = nextTokenDoc._id;
+  searchService.client = new GitHubClient(nextTokenDoc.token);
+
+  if (emailExtractor) {
+    emailExtractor.client = new GitHubClient(nextTokenDoc.token);
+  }
+
+  search.tokenId = nextTokenDoc._id;
+  search.tokenName = nextTokenDoc.name;
+  search.status = 'running';
+  search.error = null;
+  await search.save();
+
+  if (io) {
+    io.emit('search:token:rotated', {
+      searchId: search.searchId,
+      previousToken: currentTokenDoc?.name ?? null,
+      currentToken: nextTokenDoc.name,
+      fullCycle,
+    });
+  }
+
+  logger.info(`Search ${search.searchId} rotated to token: ${nextTokenDoc.name}`);
+  return nextTokenDoc;
+}
+
 /**
  * Get all searches
  */
@@ -112,13 +230,24 @@ router.post('/searches/:id/execute', async (req, res) => {
       return res.status(400).json({ error: 'Search is already running' });
     }
 
-    // Select best available token
-    selectedToken = await TokenSelector.selectBestToken();
+    // First token in stable createdAt order
+    selectedToken = await TokenSelector.selectFirstToken();
     if (!selectedToken) {
-      search.status = 'failed';
-      search.error = 'No available GitHub tokens in database. Add tokens via Tokens tab.';
+      search.status = 'awaiting_tokens';
+      search.error =
+        'No GitHub tokens in database yet — search will start automatically when one is added';
       await search.save();
-      return res.status(400).json({ error: search.error });
+      logger.warn(`Search ${search.searchId} queued: awaiting tokens`);
+
+      res.status(202).json({
+        id: search._id,
+        searchId: search.searchId,
+        status: search.status,
+        message: search.error,
+      });
+
+      executeSearchInBackground(search, null, req.io);
+      return;
     }
 
     // Update search with token info and status
@@ -165,11 +294,22 @@ async function executeSearchInBackground(search, selectedToken, io) {
     runningSearches.set(search.searchId, { status: 'running', shouldPause: false });
     logger.info(`Search ${search.searchId} registered in running searches`);
 
-    // Get token full document
-    const token = await Token.findById(selectedToken._id);
+    let token = selectedToken ? await Token.findById(selectedToken._id) : null;
+    if (!token) {
+      token = await waitForAvailableToken(search, io);
+      if (!token) {
+        search.status = 'paused';
+        await search.save();
+        runningSearches.delete(search.searchId);
+        return;
+      }
+    }
 
     // Initialize search service with selected token and search parameters
-    const searchService = new UserSearchService(token.token, search.parameters);
+    const searchService = new UserSearchService(token.token, search.parameters, {
+      currentTokenId: token._id,
+    });
+    let emailExtractor = new EmailExtractorService(token.token);
     
     // Generate search combinations
     const combinations = searchService.generateSearchCombinations();
@@ -266,7 +406,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
         if (users.length > 0) {
           // Estimate API requests used (1 search call + 1 per page)
           const estimatedPages = Math.ceil(users.length / 100);
-          await TokenSelector.updateTokenUsage(selectedToken._id, estimatedPages);
+          await TokenSelector.updateTokenUsage(token._id, estimatedPages);
         }
 
         logger.info(`Found ${users.length} users for ${combo.location} ${combo.year}`);
@@ -303,7 +443,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               userProfile = await searchService.client.getUserProfile(user.login);
               logger.debug(`Fetched full profile for ${user.login}`);
               // Track token usage for profile fetch
-              await TokenSelector.updateTokenUsage(selectedToken._id, 1);
+              await TokenSelector.updateTokenUsage(token._id, 1);
             } catch (profileError) {
               logger.warn(`Could not fetch full profile for ${user.login}, using search result: ${profileError.message}`);
               // Continue with search result data if profile fetch fails
@@ -313,7 +453,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
             const extractedData = await emailExtractor.extractEmailsForUser(userProfile);
 
             // Track token usage for email extraction (commit search + readme fetch)
-            await TokenSelector.updateTokenUsage(selectedToken._id, 2);
+            await TokenSelector.updateTokenUsage(token._id, 2);
 
             const newUser = new User({
               searchId: search.searchId,
@@ -412,48 +552,29 @@ async function executeSearchInBackground(search, selectedToken, io) {
       } catch (comboError) {
         logger.error(`Error in combination ${combo.location} ${combo.year}: ${comboError.message}`);
 
-        // Check if it's a token error requiring failover
-        const status = comboError.response?.status;
-        if (status === 401 || status === 403) {
-          // Mark current token as failed/rate-limited before trying next token
-          const errorReason = `GitHub API error: ${comboError.message}`;
-          await TokenSelector.markTokenError(selectedToken._id, errorReason);
-          logger.warn(`Token ${selectedToken.name} marked as failed. Attempting to select next available token...`);
+        if (isGitHubTokenError(comboError)) {
+          const errorReason = `GitHub API error (${comboError.response?.status}): ${comboError.message}`;
+          logger.warn(
+            `Token ${token.name} hit ${comboError.response?.status} — rotating to next token by createdAt`
+          );
 
-          // Token failed, try to select next one
-          const nextToken = await TokenSelector.selectBestToken();
-          if (nextToken && nextToken._id.toString() !== token._id.toString()) {
-            logger.info(`Failover to next token: ${nextToken.name}`);
-            const nextTokenDoc = await Token.findById(nextToken._id);
-            const GitHubClient = require('../api/githubClient');
-            searchService.currentToken = nextTokenDoc.token;
-            searchService.client = new GitHubClient(nextTokenDoc.token);
+          const nextTokenDoc = await rotateSearchToken(
+            search,
+            searchService,
+            emailExtractor,
+            token,
+            io,
+            errorReason
+          );
 
-            // Update local references for next iteration
-            token.token = nextTokenDoc.token;
-            Object.assign(token, nextTokenDoc.toObject());
-            // Update search with new token
-            search.tokenId = nextToken._id;
-            search.tokenName = nextToken.name;
-            await search.save();
-
-            // Broadcast failover event
-            if (io) {
-              io.emit('search:token:failover', {
-                searchId: search.searchId,
-                previousToken: selectedToken.name,
-                currentToken: nextToken.name,
-              });
-            }
-          } else {
-            throw new Error('No available tokens for failover');
+          if (!nextTokenDoc) {
+            break;
           }
-          
-          // Retry the combination with the new token after a short delay
-          logger.info(`Retrying combination ${combo.location} ${combo.year} with new token...`);
-          await new Promise((resolve) => setTimeout(resolve, 500)); // Brief delay before retry
-          i--; // Decrement loop counter to retry this combination
-          continue; // Skip error logging and move to next iteration (which will retry current combo)
+
+          token = nextTokenDoc;
+          logger.info(`Retrying combination ${combo.location} ${combo.year} with token ${token.name}`);
+          i--;
+          continue;
         }
 
         search.searchLog.push({
@@ -470,6 +591,15 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
       // Rate limiting
       await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    const loopState = runningSearches.get(search.searchId);
+    if (loopState?.shouldPause) {
+      search.status = 'paused';
+      await search.save();
+      runningSearches.delete(search.searchId);
+      logger.info(`Search ${search.searchId} paused at ${search.progress.percentage}%`);
+      return;
     }
 
     // Search completed successfully
@@ -504,7 +634,32 @@ async function executeSearchInBackground(search, selectedToken, io) {
     // Clean up from running searches
     runningSearches.delete(search.searchId);
   } catch (error) {
-    logger.error(`Search execution failed: ${error.message}`);
+    logger.error(`Search execution error: ${error.message}`);
+
+    const paused = runningSearches.get(search.searchId)?.shouldPause;
+    if (paused) {
+      search.status = 'paused';
+      await search.save();
+      runningSearches.delete(search.searchId);
+      return;
+    }
+
+    if (isGitHubTokenError(error)) {
+      search.status = 'awaiting_tokens';
+      search.error = 'Token rotation in progress — search will continue automatically';
+      await search.save();
+
+      if (io) {
+        io.emit('search:awaiting_tokens', {
+          searchId: search.searchId,
+          message: search.error,
+        });
+      }
+
+      runningSearches.delete(search.searchId);
+      executeSearchInBackground(search, null, io);
+      return;
+    }
 
     search.status = 'failed';
     search.error = error.message;
@@ -512,12 +667,6 @@ async function executeSearchInBackground(search, selectedToken, io) {
     search.duration = Date.now() - startTime;
     await search.save();
 
-    // Mark token as having error
-    if (selectedToken) {
-      await TokenSelector.markTokenError(selectedToken._id, error.message);
-    }
-
-    // Broadcast failure
     if (io) {
       io.emit('search:failed', {
         searchId: search.searchId,
@@ -526,7 +675,6 @@ async function executeSearchInBackground(search, selectedToken, io) {
       });
     }
 
-    // Clean up from running searches
     runningSearches.delete(search.searchId);
   }
 }
@@ -711,27 +859,42 @@ router.post('/searches/:id/resume', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    if (search.status !== 'paused' && search.status !== 'failed') {
-      return res.status(400).json({ error: 'Can only resume paused or failed searches' });
+    if (!['paused', 'failed', 'awaiting_tokens'].includes(search.status)) {
+      return res.status(400).json({
+        error: 'Can only resume paused, failed, or awaiting_tokens searches',
+      });
     }
 
-    // Select best available token
-    const selectedToken = await TokenSelector.selectBestToken();
+    const previousStatus = search.status;
+
+    let selectedToken = await TokenSelector.selectFirstToken();
     if (!selectedToken) {
-      return res.status(400).json({ error: 'No available GitHub tokens' });
+      search.status = 'awaiting_tokens';
+      search.error = 'No GitHub tokens yet — will resume when a token is available';
+      search.resumedAt = new Date();
+      await search.save();
+
+      executeSearchInBackground(search, null, req.io);
+
+      return res.status(202).json({
+        id: search._id,
+        searchId: search.searchId,
+        status: search.status,
+        message: `Search resumed from ${previousStatus} — awaiting tokens`,
+      });
     }
 
     search.status = 'running';
     search.resumedAt = new Date();
     search.tokenId = selectedToken._id;
     search.tokenName = selectedToken.name;
-    search.error = null; // Clear error if resuming a failed search
+    search.error = null;
     await search.save();
 
-    const previousStatus = search.status === 'failed' ? 'failed' : 'paused';
-    logger.info(`Search resumed from ${previousStatus} status: ${search.searchId} with token: ${selectedToken.name}`);
+    logger.info(
+      `Search resumed from ${previousStatus}: ${search.searchId} with token: ${selectedToken.name}`
+    );
 
-    // Execute search in background
     executeSearchInBackground(search, selectedToken, req.io);
 
     res.json({

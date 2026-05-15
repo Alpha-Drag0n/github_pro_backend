@@ -32,7 +32,7 @@ const searchSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'running', 'paused', 'completed', 'failed'],
+    enum: ['pending', 'running', 'paused', 'completed', 'failed', 'awaiting_tokens'],
     default: 'pending',
   },
   progress: {

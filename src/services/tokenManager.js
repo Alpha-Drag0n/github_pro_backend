@@ -6,6 +6,7 @@
 const axios = require('axios');
 const Logger = require('../utils/logger');
 const Token = require('../models/tokenModel');
+const TokenSelector = require('./tokenSelector');
 
 class TokenManager {
   constructor() {
@@ -20,7 +21,7 @@ class TokenManager {
    */
   async initialize() {
     try {
-      this.tokens = await Token.find({ isActive: true });
+      this.tokens = await Token.find({ isActive: true }).sort({ createdAt: 1 });
       this.logger.info(`Loaded ${this.tokens.length} active tokens`);
 
       if (this.tokens.length === 0) {
@@ -111,25 +112,18 @@ class TokenManager {
   }
 
   /**
-   * Switch to next token
+   * Switch to next token in createdAt order (wraps to first).
    */
   async switchToNextToken() {
     const currentToken = this.getCurrentToken();
+    const { token: nextToken } = await TokenSelector.selectNextToken(currentToken?._id);
 
-    if (currentToken) {
-      // currentToken.status = 'rate_limited';
-      await currentToken.save();
+    if (nextToken) {
+      this.logger.info(`Switched to token: ${nextToken.name}`);
+      return nextToken;
     }
 
-    // Find next active token
-    for (const token of this.tokens) {
-      if (token.status === 'active' && token.isActive) {
-        this.logger.info(`Switched to token: ${token.name}`);
-        return token;
-      }
-    }
-
-    this.logger.error('No available tokens');
+    this.logger.warn('No tokens in database for rotation');
     return null;
   }
 

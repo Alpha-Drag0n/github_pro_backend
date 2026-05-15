@@ -165,13 +165,13 @@ router.post('/tokens/check/all', async (req, res) => {
 });
 
 /**
- * Get best available token for next search
+ * Get first token in createdAt order (start of rotation)
  */
 router.get('/tokens/select/best', async (req, res) => {
   try {
-    const token = await TokenSelector.selectBestToken();
+    const token = await TokenSelector.selectFirstToken();
     if (!token) {
-      return res.status(404).json({ error: 'No available tokens with remaining requests' });
+      return res.status(404).json({ error: 'No GitHub tokens in database' });
     }
 
     res.json({

@@ -5,14 +5,19 @@
 
 const GitHubClient = require('../api/githubClient');
 const Logger = require('../utils/logger');
+const Token = require('../models/tokenModel');
+const TokenSelector = require('./tokenSelector');
 const { sleep } = require('../utils/helpers');
 
+const TOKEN_ROTATION_DELAY_MS = 500;
+const TOKEN_FULL_CYCLE_COOLDOWN_MS = 60000;
+
 class UserSearchService {
-  constructor(githubToken, searchParameters = null, tokenManager = null) {
+  constructor(githubToken, searchParameters = null, options = {}) {
     this.client = new GitHubClient(githubToken);
     this.logger = new Logger();
-    this.tokenManager = tokenManager;
     this.currentToken = githubToken;
+    this.currentTokenId = options.currentTokenId || null;
     this.foundUsers = [];
     this.searchLog = [];
     
@@ -46,27 +51,24 @@ class UserSearchService {
       // Handle rate limiting and authentication errors with failover
       const status = error.response?.status;
       
-      if ((status === 401 || status === 403) && this.tokenManager) {
-        this.logger.warn(`${operation} failed with status ${status}. Attempting token failover...`);
-        
-        try {
-          const nextToken = await this.tokenManager.switchToNextToken();
-          
-          if (nextToken) {
-            this.logger.info(`Switched to token: ${nextToken.name}`);
-            this.currentToken = nextToken.token;
-            this.client = new GitHubClient(nextToken.token);
-            
-            // Retry with new token
-            return await apiCall(this.client);
-          } else {
-            this.logger.error('No available tokens for failover');
-            throw new Error('No available tokens');
-          }
-        } catch (failoverError) {
-          this.logger.error(`Failover failed: ${failoverError.message}`);
-          throw failoverError;
+      if (status === 401 || status === 403) {
+        this.logger.warn(`${operation} failed with status ${status}. Rotating to next token...`);
+
+        const { token: nextMeta, fullCycle } = await TokenSelector.selectNextToken(this.currentTokenId);
+
+        if (!nextMeta) {
+          throw error;
         }
+
+        const nextDoc = await Token.findById(nextMeta._id);
+        this.currentTokenId = nextDoc._id;
+        this.currentToken = nextDoc.token;
+        this.client = new GitHubClient(nextDoc.token);
+
+        this.logger.info(`Switched to token: ${nextDoc.name}${fullCycle ? ' (full rotation cycle)' : ''}`);
+
+        await sleep(fullCycle ? TOKEN_FULL_CYCLE_COOLDOWN_MS : TOKEN_ROTATION_DELAY_MS);
+        return await apiCall(this.client);
       }
       
       throw error;

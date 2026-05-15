@@ -1,7 +1,6 @@
 /**
  * Token Selector Service
- * Intelligently selects the best available token for API calls
- * Handles priority, rate limits, and token health
+ * Deterministic token rotation ordered by createdAt (oldest first).
  */
 
 const Token = require('../models/tokenModel');
@@ -9,74 +8,84 @@ const Logger = require('../utils/logger');
 
 const logger = new Logger();
 
+const CREATED_AT_SORT = { createdAt: 1 };
+
 /**
- * Get the best available token for API calls
- * Selection criteria (in order):
- * 1. Token must be active (isActive: true)
- * 2. Token must have healthy status (not 'invalid' or 'expired')
- * 3. Token must have requests remaining
- * 4. Select token used least recently (load balancing - PRIMARY)
- *
- * @returns {Object|null} Token document or null if no tokens available
+ * All tokens in stable creation order (same order on every query).
+ * @returns {Promise<Array>}
  */
-async function selectBestToken() {
-  try {
-    // Find all potentially usable tokens
-    const tokens = await Token.find({
-      // isActive: true,
-      // status: { $in: ['active', 'rate_limited'] },
-      // requestsRemaining: { $gt: 0 },
-    }).sort({
-      lastUsed: 1, // Least recently used first (load balancing)
-    });
-
-    if (tokens.length === 0) {
-      logger.warn('No available tokens with remaining requests');
-      return null;
-    }
-
-    const selectedToken = tokens[0];
-    logger.info(
-      `Selected token: ${selectedToken.name} (${selectedToken.requestsRemaining}/${selectedToken.requestsLimit} requests, lastUsed: ${selectedToken.lastUsed || 'never'})`
-    );
-
-    return selectedToken;
-  } catch (error) {
-    logger.error(`Error selecting token: ${error.message}`);
-    return null;
-  }
+async function getTokensByCreatedAt() {
+  return Token.find().sort(CREATED_AT_SORT);
 }
 
 /**
- * Get token by ID and check if it's available
- * @param {string} tokenId - MongoDB token ID
- * @returns {Object|null} Token document or null if not available
+ * First token in creation order (start of rotation).
+ * @returns {Promise<Object|null>}
+ */
+async function selectFirstToken() {
+  const tokens = await getTokensByCreatedAt();
+  if (tokens.length === 0) {
+    logger.warn('No GitHub tokens in database');
+    return null;
+  }
+
+  const selected = tokens[0];
+  logger.info(`Selected first token (by createdAt): ${selected.name}`);
+  return selected;
+}
+
+/**
+ * Next token after currentTokenId in creation order; wraps to the first token.
+ * @param {string|Object|null} currentTokenId - Current token _id (null = first token)
+ * @returns {Promise<{ token: Object|null, fullCycle: boolean }>}
+ */
+async function selectNextToken(currentTokenId = null) {
+  const tokens = await getTokensByCreatedAt();
+
+  if (tokens.length === 0) {
+    logger.warn('No GitHub tokens in database');
+    return { token: null, fullCycle: false };
+  }
+
+  if (!currentTokenId) {
+    return { token: tokens[0], fullCycle: false };
+  }
+
+  const currentId = currentTokenId.toString();
+  const currentIdx = tokens.findIndex((t) => t._id.toString() === currentId);
+
+  if (currentIdx === -1) {
+    logger.warn(`Current token ${currentId} not found; starting rotation from first token`);
+    return { token: tokens[0], fullCycle: false };
+  }
+
+  const nextIdx = (currentIdx + 1) % tokens.length;
+  const fullCycle =
+    tokens.length === 1 || (currentIdx === tokens.length - 1 && nextIdx === 0);
+  const selected = tokens[nextIdx];
+
+  logger.info(
+    `Rotated to next token: ${selected.name} (index ${nextIdx + 1}/${tokens.length}${fullCycle ? ', full cycle' : ''})`
+  );
+
+  return { token: selected, fullCycle };
+}
+
+/**
+ * @deprecated Use selectFirstToken for new searches.
+ */
+async function selectBestToken() {
+  return selectFirstToken();
+}
+
+/**
+ * Get token by ID
+ * @param {string} tokenId
+ * @returns {Promise<Object|null>}
  */
 async function getTokenById(tokenId) {
   try {
-    const token = await Token.findById(tokenId);
-
-    if (!token) {
-      logger.warn(`Token not found: ${tokenId}`);
-      return null;
-    }
-
-    if (!token.isActive) {
-      logger.warn(`Token is not active: ${token.name}`);
-      return null;
-    }
-
-    if (token.status === 'invalid' || token.status === 'expired') {
-      logger.warn(`Token is not healthy: ${token.name} (${token.status})`);
-      return null;
-    }
-
-    if (token.requestsRemaining <= 0) {
-      logger.warn(`Token has no remaining requests: ${token.name}`);
-      return null;
-    }
-
-    return token;
+    return await Token.findById(tokenId);
   } catch (error) {
     logger.error(`Error getting token by ID: ${error.message}`);
     return null;
@@ -84,19 +93,12 @@ async function getTokenById(tokenId) {
 }
 
 /**
- * Get all available tokens (for monitoring/selection)
- * @returns {Array} Array of available token documents
+ * All tokens in creation order (without secret value in list responses).
+ * @returns {Promise<Array>}
  */
 async function getAllAvailableTokens() {
   try {
-    const tokens = await Token.find({
-      // isActive: true,
-      // status: { $in: ['active', 'rate_limited'] },
-    })
-      .select('-token') // Don't return the actual token value
-      .sort({ lastUsed: 1 });
-
-    return tokens;
+    return Token.find().select('-token').sort(CREATED_AT_SORT);
   } catch (error) {
     logger.error(`Error getting available tokens: ${error.message}`);
     return [];
@@ -104,9 +106,8 @@ async function getAllAvailableTokens() {
 }
 
 /**
- * Update token usage (called after successful API call)
- * @param {string} tokenId - MongoDB token ID
- * @param {number} requestsUsed - Number of requests consumed
+ * @param {string} tokenId
+ * @param {number} requestsUsed
  */
 async function updateTokenUsage(tokenId, requestsUsed = 1) {
   try {
@@ -117,22 +118,18 @@ async function updateTokenUsage(tokenId, requestsUsed = 1) {
       return false;
     }
 
-    // Update token metrics
     token.lastUsed = new Date();
     token.successCount += 1;
-    token.usageCount += 1; // Increment total usage count
+    token.usageCount += 1;
     token.requestsRemaining = Math.max(0, token.requestsRemaining - requestsUsed);
 
-    // If no requests left, mark as rate limited
     if (token.requestsRemaining <= 0) {
-      // token.status = 'rate_limited';
       logger.warn(
         `Token rate limited: ${token.name} (${token.requestsRemaining}/${token.requestsLimit})`
       );
     }
 
     await token.save();
-    logger.debug(`Token usage updated: ${token.name} (Total: ${token.usageCount}, Remaining: ${token.requestsRemaining})`);
     return true;
   } catch (error) {
     logger.error(`Error updating token usage: ${error.message}`);
@@ -141,9 +138,9 @@ async function updateTokenUsage(tokenId, requestsUsed = 1) {
 }
 
 /**
- * Mark token as having an error (called after API error)
- * @param {string} tokenId - MongoDB token ID
- * @param {string} errorReason - Error message/reason
+ * Record an API error on a token (does not disable rotation).
+ * @param {string} tokenId
+ * @param {string} errorReason
  */
 async function markTokenError(tokenId, errorReason) {
   try {
@@ -157,20 +154,6 @@ async function markTokenError(tokenId, errorReason) {
     token.errorCount += 1;
     token.failureReason = errorReason;
     token.lastChecked = new Date();
-
-    // Mark as invalid if authentication fails
-    if (errorReason.includes('401') || errorReason.includes('authentication')) {
-      // token.status = 'invalid';
-      // token.isActive = false;
-      logger.error(`Token marked as invalid: ${token.name}`);
-    }
-    // Mark as expired if token is revoked
-    else if (errorReason.includes('403') || errorReason.includes('revoked')) {
-      // token.status = 'expired';
-      // token.isActive = false;
-      logger.error(`Token marked as expired: ${token.name}`);
-    }
-
     await token.save();
     return true;
   } catch (error) {
@@ -180,25 +163,22 @@ async function markTokenError(tokenId, errorReason) {
 }
 
 /**
- * Get token status summary
- * @returns {Object} Summary of token statuses
+ * @returns {Promise<Object|null>}
  */
 async function getTokenStatusSummary() {
   try {
     const tokens = await Token.find().select('-token');
 
-    const summary = {
+    return {
       total: tokens.length,
-      active: tokens.filter(t => t.status === 'active').length,
-      rateLimited: tokens.filter(t => t.status === 'rate_limited').length,
-      expired: tokens.filter(t => t.status === 'expired').length,
-      invalid: tokens.filter(t => t.status === 'invalid').length,
+      active: tokens.filter((t) => t.status === 'active').length,
+      rateLimited: tokens.filter((t) => t.status === 'rate_limited').length,
+      expired: tokens.filter((t) => t.status === 'expired').length,
+      invalid: tokens.filter((t) => t.status === 'invalid').length,
       totalRequestsRemaining: tokens.reduce((sum, t) => sum + t.requestsRemaining, 0),
       totalRequestsLimit: tokens.reduce((sum, t) => sum + t.requestsLimit, 0),
-      availableForUse: tokens.filter(t => t.isActive && t.status === 'active').length,
+      availableForUse: tokens.filter((t) => t.isActive && t.status === 'active').length,
     };
-
-    return summary;
   } catch (error) {
     logger.error(`Error getting token status summary: ${error.message}`);
     return null;
@@ -206,6 +186,9 @@ async function getTokenStatusSummary() {
 }
 
 module.exports = {
+  getTokensByCreatedAt,
+  selectFirstToken,
+  selectNextToken,
   selectBestToken,
   getTokenById,
   getAllAvailableTokens,
