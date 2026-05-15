@@ -16,6 +16,9 @@ const EmailExtractorService = require('../services/emailExtractorService');
 
 const logger = new Logger();
 
+// Track running searches to support pause/resume
+const runningSearches = new Map(); // Map<searchId, { status, abortFlag }>
+
 /**
  * Get all searches
  */
@@ -158,6 +161,10 @@ async function executeSearchInBackground(search, selectedToken, io) {
   let currentCombination = 0;
 
   try {
+    // Register this search as running
+    runningSearches.set(search.searchId, { status: 'running', shouldPause: false });
+    logger.info(`Search ${search.searchId} registered in running searches`);
+
     // Get token full document
     const token = await Token.findById(selectedToken._id);
 
@@ -180,6 +187,13 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
     // Execute search with progress tracking
     for (let i = 0; i < combinations.length; i++) {
+      // Check if search has been paused
+      const searchState = runningSearches.get(search.searchId);
+      if (searchState && searchState.shouldPause) {
+        logger.info(`Search ${search.searchId} paused at combination ${currentCombination}/${totalCombinations}`);
+        break; // Exit the loop - search will be paused
+      }
+
       // Skip already completed combinations
       if (completedIndices.includes(i)) {
         currentCombination = i + 1;
@@ -263,6 +277,13 @@ async function executeSearchInBackground(search, selectedToken, io) {
         let skippedUsersCount = 0;
 
         for (const user of users) {
+          // Check again if search has been paused while processing users
+          const searchState = runningSearches.get(search.searchId);
+          if (searchState && searchState.shouldPause) {
+            logger.info(`Search ${search.searchId} paused while processing users`);
+            break; // Exit the user processing loop
+          }
+
           try {
             // Check if user already exists in database
             const existingUser = await User.findOne({
@@ -479,6 +500,9 @@ async function executeSearchInBackground(search, selectedToken, io) {
         usersFound: search.results.totalUsersFound,
       });
     }
+
+    // Clean up from running searches
+    runningSearches.delete(search.searchId);
   } catch (error) {
     logger.error(`Search execution failed: ${error.message}`);
 
@@ -501,6 +525,9 @@ async function executeSearchInBackground(search, selectedToken, io) {
         error: error.message,
       });
     }
+
+    // Clean up from running searches
+    runningSearches.delete(search.searchId);
   }
 }
 
@@ -646,6 +673,14 @@ router.post('/searches/:id/pause', async (req, res) => {
       return res.status(400).json({ error: 'Can only pause running searches' });
     }
 
+    // Set pause flag in memory to stop the background execution
+    const searchState = runningSearches.get(search.searchId);
+    if (searchState) {
+      searchState.shouldPause = true;
+      logger.info(`Pause flag set for search ${search.searchId}`);
+    }
+
+    // Update database status
     search.status = 'paused';
     search.pausedAt = new Date();
     await search.save();
