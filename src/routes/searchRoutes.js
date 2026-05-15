@@ -23,6 +23,7 @@ const {
   getSearchWorkerState,
   clearShouldPause,
 } = require('../services/searchWorkerRegistry');
+const { notifySearchChange } = require('../services/searchBroadcast');
 
 const logger = new Logger();
 
@@ -68,6 +69,7 @@ async function waitForAvailableToken(search, io) {
           search.tokenId = doc._id;
           search.tokenName = doc.name;
           await search.save();
+          await notifySearchChange(io, search);
           if (io) {
             io.emit('search:token:available', {
               searchId: search.searchId,
@@ -82,6 +84,7 @@ async function waitForAvailableToken(search, io) {
     search.status = 'awaiting_tokens';
     search.error = 'Waiting for a GitHub token — will retry automatically';
     await search.save();
+    await notifySearchChange(io, search);
 
     if (io) {
       io.emit('search:awaiting_tokens', {
@@ -142,6 +145,7 @@ async function rotateSearchToken(search, searchService, emailExtractor, currentT
   search.status = 'running';
   search.error = null;
   await search.save();
+  await notifySearchChange(io, search);
 
   if (io) {
     io.emit('search:token:rotated', {
@@ -266,6 +270,7 @@ router.post('/searches/:id/execute', async (req, res) => {
       search.error =
         'No GitHub tokens in database yet — search will start automatically when one is added';
       await search.save();
+      await notifySearchChange(req.io, search);
       logger.warn(`Search ${search.searchId} queued: awaiting tokens`);
 
       res.status(202).json({
@@ -292,6 +297,7 @@ router.post('/searches/:id/execute', async (req, res) => {
     }
     search.error = null;
     await search.save();
+    await notifySearchChange(req.io, search);
 
     logger.info(`Search ${search.searchId} started with token: ${selectedToken.name}`);
 
@@ -337,6 +343,21 @@ async function executeSearchInBackground(search, selectedToken, io) {
   }
 
   try {
+    const freshDoc = await Search.findOne({ searchId });
+    if (!freshDoc) {
+      releaseSearchWorker(searchId);
+      return;
+    }
+    search = freshDoc;
+
+    if (search.status !== 'completed') {
+      search.status = 'running';
+      search.error = null;
+      search.startedAt = search.startedAt || new Date();
+      await search.save();
+      await notifySearchChange(io, search);
+    }
+
     logger.info(`Search ${searchId} worker started (${getActiveWorkerCount()} active)`);
 
     let token = selectedToken ? await Token.findById(selectedToken._id) : null;
@@ -345,6 +366,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
       if (!token) {
         search.status = 'paused';
         await search.save();
+        await notifySearchChange(io, search);
         releaseSearchWorker(searchId);
         return;
       }
@@ -657,6 +679,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
     if (loopState?.shouldPause) {
       search.status = 'paused';
       await search.save();
+      await notifySearchChange(io, search);
       releaseSearchWorker(searchId);
       logger.info(`Search ${searchId} paused at ${search.progress.percentage}%`);
       return;
@@ -682,6 +705,8 @@ async function executeSearchInBackground(search, selectedToken, io) {
       `Search ${search.searchId} completed in ${(duration / 1000).toFixed(2)}s. Found ${search.results.totalUsersFound} users`
     );
 
+    await notifySearchChange(io, search);
+
     // Broadcast completion
     if (io) {
       io.emit('search:completed', {
@@ -700,6 +725,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
     if (paused) {
       search.status = 'paused';
       await search.save();
+      await notifySearchChange(io, search);
       releaseSearchWorker(searchId);
       return;
     }
@@ -708,6 +734,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
       search.status = 'awaiting_tokens';
       search.error = 'Token rotation in progress — search will continue automatically';
       await search.save();
+      await notifySearchChange(io, search);
 
       if (io) {
         io.emit('search:awaiting_tokens', {
@@ -732,6 +759,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
     search.completedAt = new Date();
     search.duration = Date.now() - startTime;
     await search.save();
+    await notifySearchChange(io, search);
 
     if (io) {
       io.emit('search:failed', {
@@ -906,6 +934,7 @@ router.post('/searches/:id/pause', async (req, res) => {
     search.status = 'paused';
     search.pausedAt = new Date();
     await search.save();
+    await notifySearchChange(req.io, search);
 
     logger.info(`Search paused: ${search.searchId}`);
 
@@ -963,6 +992,7 @@ router.post('/searches/:id/resume', async (req, res) => {
       search.error = 'No GitHub tokens yet — will resume when a token is available';
       search.resumedAt = new Date();
       await search.save();
+      await notifySearchChange(req.io, search);
 
       executeSearchInBackground(search, null, req.io);
 
@@ -980,6 +1010,7 @@ router.post('/searches/:id/resume', async (req, res) => {
     search.tokenName = selectedToken.name;
     search.error = null;
     await search.save();
+    await notifySearchChange(req.io, search);
 
     logger.info(
       `Search resumed from ${previousStatus}: ${search.searchId} with token: ${selectedToken.name}`

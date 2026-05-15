@@ -25,6 +25,7 @@ const setupSocketHandlers = require('./routes/socketRoutes');
 const { recoverSearchesOnStartup } = require('./services/searchRecovery');
 const { registerGracefulShutdown } = require('./services/gracefulShutdown');
 const { startSelfKeepAlive, stopSelfKeepAlive } = require('./services/keepAlive');
+const { recordHealthCheck } = require('./services/healthLogService');
 
 const app = express();
 const server = http.createServer(app);
@@ -126,12 +127,19 @@ async function startServer() {
 
     registerGracefulShutdown({ server });
 
-    await recoverSearchesOnStartup(io, (search, selectedToken) => {
-      searchRoutes.executeSearchInBackground(search, selectedToken, io);
-    });
-
-    server.listen(PORT, () => {
+    server.listen(PORT, async () => {
       startSelfKeepAlive();
+
+      await recordHealthCheck({
+        source: 'startup',
+        mongoConnected: Database.isConnected(),
+        httpStatus: 200,
+        message: 'Server started',
+      });
+
+      await recoverSearchesOnStartup(io, (search, selectedToken) => {
+        searchRoutes.executeSearchInBackground(search, selectedToken, io);
+      });
 
       logger.info(`================================`);
       logger.info(`Server running on port ${PORT}`);
@@ -148,6 +156,8 @@ async function startServer() {
       );
       logger.info(`API Endpoints:`);
       logger.info(`  GET    /health                  - Service health check (public)`);
+      logger.info(`  GET    /health/status           - Current alive/dead summary`);
+      logger.info(`  GET    /health/logs             - Health check history`);
       logger.info(`  POST   /api/tokens              - Add new token`);
       logger.info(`  GET    /api/tokens              - List all tokens`);
       logger.info(`  DELETE /api/tokens/:id          - Delete token`);

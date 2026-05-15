@@ -5,25 +5,35 @@
 const http = require('http');
 const https = require('https');
 const Logger = require('../utils/logger');
+const { recordHealthCheck } = require('./healthLogService');
+const Database = require('../utils/database');
 
 const logger = new Logger();
 
 let intervalId = null;
 
 function pingHealth(url) {
+  const started = Date.now();
   return new Promise((resolve) => {
     const client = url.startsWith('https') ? https : http;
     const req = client.get(url, { timeout: 10000 }, (res) => {
       res.resume();
-      resolve(res.statusCode);
+      resolve({ httpStatus: res.statusCode, responseTimeMs: Date.now() - started });
     });
     req.on('error', (err) => {
-      logger.debug(`Keep-alive ping failed: ${err.message}`);
-      resolve(null);
+      resolve({
+        httpStatus: null,
+        responseTimeMs: Date.now() - started,
+        error: err.message,
+      });
     });
     req.on('timeout', () => {
       req.destroy();
-      resolve(null);
+      resolve({
+        httpStatus: null,
+        responseTimeMs: Date.now() - started,
+        error: 'timeout',
+      });
     });
   });
 }
@@ -47,11 +57,35 @@ function startSelfKeepAlive() {
 
   logger.info(`Self keep-alive enabled: GET ${url} every ${intervalMs / 1000}s`);
 
-  pingHealth(url);
+  const runPing = async () => {
+    const result = await pingHealth(url);
+    const mongoConnected = Database.isConnected();
 
-  intervalId = setInterval(() => {
-    pingHealth(url);
-  }, intervalMs);
+    if (result.httpStatus === 200 && mongoConnected) {
+      await recordHealthCheck({
+        source: 'keep_alive',
+        mongoConnected,
+        httpStatus: result.httpStatus,
+        responseTimeMs: result.responseTimeMs,
+        message: 'Keep-alive ping succeeded',
+      });
+    } else {
+      await recordHealthCheck({
+        source: 'keep_alive',
+        mongoConnected,
+        httpStatus: result.httpStatus,
+        responseTimeMs: result.responseTimeMs,
+        status: result.httpStatus === 200 && !mongoConnected ? 'degraded' : 'dead',
+        message: result.error
+          ? `Keep-alive ping failed: ${result.error}`
+          : `Keep-alive ping HTTP ${result.httpStatus}`,
+      });
+    }
+  };
+
+  runPing();
+
+  intervalId = setInterval(runPing, intervalMs);
 }
 
 function stopSelfKeepAlive() {

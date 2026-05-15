@@ -5,6 +5,8 @@
 const Search = require('../models/searchModel');
 const Logger = require('../utils/logger');
 const { stopSelfKeepAlive } = require('./keepAlive');
+const { recordHealthCheck } = require('./healthLogService');
+const Database = require('../utils/database');
 const { SHUTDOWN_MESSAGE } = require('./searchRecovery');
 const {
   setShuttingDown,
@@ -42,6 +44,13 @@ async function runShutdown(server) {
   stopSelfKeepAlive();
   setShuttingDown(true);
   logger.info('Graceful shutdown started');
+
+  await recordHealthCheck({
+    source: 'shutdown',
+    mongoConnected: Database.isConnected(),
+    status: 'dead',
+    message: 'Graceful shutdown initiated',
+  });
 
   pauseAllActiveWorkers();
 

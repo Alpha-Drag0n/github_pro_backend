@@ -5,9 +5,11 @@
 const Search = require('../models/searchModel');
 const Logger = require('../utils/logger');
 const SearchTokenPool = require('./searchTokenPool');
+const { notifySearchChange } = require('./searchBroadcast');
 const {
   getMaxConcurrentSearches,
   tryAcquireSearchWorker,
+  releaseSearchWorker,
 } = require('./searchWorkerRegistry');
 
 const logger = new Logger();
@@ -31,13 +33,13 @@ function isSearchIncomplete(search) {
 /**
  * Mark DB rows that still say "running" but have no live worker (this process just started).
  */
-async function reconcileOrphanedSearches() {
+async function reconcileOrphanedSearches(io) {
   const orphans = await Search.find({
     status: { $in: ['running', 'awaiting_tokens'] },
   });
 
   if (orphans.length === 0) {
-    return [];
+    return 0;
   }
 
   const now = new Date();
@@ -57,7 +59,14 @@ async function reconcileOrphanedSearches() {
 
   logger.warn(`Reconciled ${orphans.length} orphaned search(es) after startup`);
 
-  return Search.find({ searchId: { $in: ids } });
+  if (io) {
+    const updated = await Search.find({ searchId: { $in: ids } });
+    for (const search of updated) {
+      await notifySearchChange(io, search);
+    }
+  }
+
+  return orphans.length;
 }
 
 /**
@@ -79,30 +88,47 @@ async function autoResumeRecoverableSearches(io, executeSearchInBackground) {
   let resumed = 0;
   let skipped = 0;
 
-  for (const search of incomplete) {
+  for (const candidate of incomplete) {
     if (resumed >= limit) {
       skipped += 1;
       continue;
     }
 
-    const slot = tryAcquireSearchWorker(search.searchId);
+    const slot = tryAcquireSearchWorker(candidate.searchId);
     if (!slot.ok) {
       skipped += 1;
       continue;
     }
 
-    const token = await SearchTokenPool.assignTokenForSearch(search.searchId);
+    const token = await SearchTokenPool.assignTokenForSearch(candidate.searchId);
 
-    search.status = 'running';
-    search.error = null;
-    search.resumedAt = new Date();
+    const update = {
+      status: 'running',
+      error: null,
+      resumedAt: new Date(),
+      recoverable: true,
+    };
+
     if (token) {
-      search.tokenId = token._id;
-      search.tokenName = token.name;
+      update.tokenId = token._id;
+      update.tokenName = token.name;
     }
-    await search.save();
 
-    logger.info(`Auto-resuming search ${search.searchId} after startup`);
+    const search = await Search.findOneAndUpdate(
+      { searchId: candidate.searchId },
+      { $set: update },
+      { new: true }
+    );
+
+    if (!search) {
+      releaseSearchWorker(candidate.searchId);
+      skipped += 1;
+      continue;
+    }
+
+    await notifySearchChange(io, search);
+
+    logger.info(`Auto-resuming search ${search.searchId} (status=running)`);
     executeSearchInBackground(search, token, io);
     resumed += 1;
   }
@@ -115,13 +141,12 @@ async function autoResumeRecoverableSearches(io, executeSearchInBackground) {
 }
 
 /**
- * Run full startup recovery sequence.
- * @param {import('socket.io').Server} io
- * @param {Function} executeSearchInBackground
+ * Run full startup recovery sequence (call after HTTP server is listening).
  */
 async function recoverSearchesOnStartup(io, executeSearchInBackground) {
-  await reconcileOrphanedSearches();
-  await autoResumeRecoverableSearches(io, executeSearchInBackground);
+  const reconciled = await reconcileOrphanedSearches(io);
+  const { resumed, skipped } = await autoResumeRecoverableSearches(io, executeSearchInBackground);
+  return { reconciled, resumed, skipped };
 }
 
 module.exports = {
