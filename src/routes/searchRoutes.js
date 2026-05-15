@@ -392,10 +392,9 @@ async function executeSearchInBackground(search, selectedToken, io) {
         // Check if this combination is already logged (already searched)
         const existingLog = await Log.findOne(getSearchComboLogFilter(search, combo));
 
-        if (existingLog) {
-          logger.info(`Skipping ${combo.location} ${combo.year} - already searched on ${existingLog.completedAt}`);
-          
-          // Add to search log and mark as skipped
+        if (existingLog?.status === 'completed') {
+          logger.info(`Skipping ${combo.location} ${combo.year} - already completed on ${existingLog.completedAt}`);
+
           search.searchLog.push({
             location: combo.location,
             year: combo.year,
@@ -404,18 +403,15 @@ async function executeSearchInBackground(search, selectedToken, io) {
             status: 'skipped (already searched)',
           });
 
-          // Mark this combination as completed
           if (!completedIndices.includes(i)) {
             search.progress.completedIndices.push(i);
           }
 
-          // Calculate and update progress
           const percentage = Math.round((currentCombination / totalCombinations) * 100);
           search.progress.current = currentCombination;
           search.progress.percentage = percentage;
           await search.save();
 
-          // Broadcast progress
           if (io) {
             io.emit('search:progress:updated', {
               searchId: search.searchId,
@@ -428,6 +424,12 @@ async function executeSearchInBackground(search, selectedToken, io) {
             });
           }
           continue;
+        }
+
+        if (existingLog?.status === 'in_progress') {
+          logger.info(
+            `Resuming ${combo.location} ${combo.year} — previous run did not finish email extraction`
+          );
         }
 
         // Search for users in this combination
@@ -453,17 +455,28 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
         logger.info(`Found ${users.length} users for ${combo.location} ${combo.year}`);
 
-        // Extract emails and save found users to database
+        await Log.findOneAndUpdate(
+          getSearchComboLogFilter(search, combo),
+          {
+            searchId: search.searchId,
+            usersFound: users.length,
+            usersProcessed: 0,
+            status: 'in_progress',
+          },
+          { upsert: true }
+        );
+
         const emailExtractor = new EmailExtractorService(token.token);
         let newUsersCount = 0;
         let skippedUsersCount = 0;
+        let comboFullyProcessed = true;
 
         for (const user of users) {
-          // Check again if search has been paused while processing users
           const searchState = getSearchWorkerState(search.searchId);
           if (searchState && searchState.shouldPause) {
             logger.info(`Search ${search.searchId} paused while processing users`);
-            break; // Exit the user processing loop
+            comboFullyProcessed = false;
+            break;
           }
 
           try {
@@ -536,18 +549,27 @@ async function executeSearchInBackground(search, selectedToken, io) {
           }
         }
 
+        if (!comboFullyProcessed) {
+          await Log.findOneAndUpdate(getSearchComboLogFilter(search, combo), {
+            usersProcessed: newUsersCount + skippedUsersCount,
+            status: 'in_progress',
+          });
+          await search.save();
+          break;
+        }
+
         await Log.findOneAndUpdate(
           getSearchComboLogFilter(search, combo),
           {
             searchId: search.searchId,
             usersFound: users.length,
+            usersProcessed: newUsersCount + skippedUsersCount,
             status: 'completed',
             completedAt: new Date(),
           },
           { upsert: true }
         );
 
-        // Update search log
         search.searchLog.push({
           location: combo.location,
           year: combo.year,
@@ -558,25 +580,20 @@ async function executeSearchInBackground(search, selectedToken, io) {
           skippedUsers: skippedUsersCount,
         });
 
-        // Update results
         search.results.totalUsersFound = await User.countDocuments({
           searchId: search.searchId,
         });
 
-        // Mark this combination as completed
         if (!completedIndices.includes(i)) {
           search.progress.completedIndices.push(i);
         }
 
-        // Calculate and update progress
         const percentage = Math.round((currentCombination / totalCombinations) * 100);
         search.progress.current = currentCombination;
         search.progress.percentage = percentage;
 
-        // Save after each combination (for resumption support)
         await search.save();
 
-        // Broadcast progress via WebSocket
         if (io) {
           io.emit('search:progress:updated', {
             searchId: search.searchId,

@@ -4,6 +4,7 @@
 
 const Search = require('../models/searchModel');
 const Logger = require('../utils/logger');
+const { stopSelfKeepAlive } = require('./keepAlive');
 const { SHUTDOWN_MESSAGE } = require('./searchRecovery');
 const {
   setShuttingDown,
@@ -38,6 +39,7 @@ async function pauseActiveSearchesInDatabase() {
 }
 
 async function runShutdown(server) {
+  stopSelfKeepAlive();
   setShuttingDown(true);
   logger.info('Graceful shutdown started');
 

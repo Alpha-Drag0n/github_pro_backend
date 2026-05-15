@@ -24,6 +24,7 @@ const socketAuthMiddleware = require('./middleware/socketAuthMiddleware');
 const setupSocketHandlers = require('./routes/socketRoutes');
 const { recoverSearchesOnStartup } = require('./services/searchRecovery');
 const { registerGracefulShutdown } = require('./services/gracefulShutdown');
+const { startSelfKeepAlive, stopSelfKeepAlive } = require('./services/keepAlive');
 
 const app = express();
 const server = http.createServer(app);
@@ -130,6 +131,8 @@ async function startServer() {
     });
 
     server.listen(PORT, () => {
+      startSelfKeepAlive();
+
       logger.info(`================================`);
       logger.info(`Server running on port ${PORT}`);
       logger.info(`MongoDB connected to ${MONGODB_URI}`);

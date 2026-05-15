@@ -6,6 +6,7 @@
 const Token = require('../models/tokenModel');
 const GitHubClient = require('../api/githubClient');
 const Logger = require('./logger');
+const { parseCoreRateLimit } = require('./githubRateLimit');
 
 const logger = new Logger();
 
@@ -98,26 +99,27 @@ async function verifyAndUpdateToken(tokenDoc) {
     tokenDoc.failureReason = null;
     tokenDoc.lastChecked = new Date();
 
-    // Get rate limit info
-    const rateLimit = await client.getRateLimit();
+    const rateLimit = parseCoreRateLimit(await client.getRateLimit());
     if (rateLimit) {
       tokenDoc.requestsRemaining = rateLimit.remaining;
       tokenDoc.requestsLimit = rateLimit.limit;
-      tokenDoc.resetTime = new Date(rateLimit.reset * 1000);
+      tokenDoc.resetTime = rateLimit.resetTime;
+    } else {
+      tokenDoc.resetTime = null;
     }
 
     await tokenDoc.save();
 
     logger.info(
-      `Token verified: ${tokenDoc.name} (${user.login}) - ${rateLimit?.remaining}/${rateLimit?.limit} requests`
+      `Token verified: ${tokenDoc.name} (${user.login}) - ${tokenDoc.requestsRemaining}/${tokenDoc.requestsLimit} requests`
     );
 
     return {
       id: tokenDoc._id,
       username: user.login,
       email: user.email,
-      requestsRemaining: rateLimit?.remaining || 5000,
-      requestsLimit: rateLimit?.limit || 5000,
+      requestsRemaining: tokenDoc.requestsRemaining,
+      requestsLimit: tokenDoc.requestsLimit,
     };
   } catch (error) {
     logger.error(`Error verifying token: ${error.message}`);

@@ -7,6 +7,7 @@ const axios = require('axios');
 const Logger = require('../utils/logger');
 const Token = require('../models/tokenModel');
 const TokenSelector = require('./tokenSelector');
+const { parseCoreRateLimit } = require('../utils/githubRateLimit');
 
 class TokenManager {
   constructor() {
@@ -157,14 +158,18 @@ class TokenManager {
         },
       });
 
-      const rateLimit = response.data.resources.core;
+      const parsed = parseCoreRateLimit(response.data.resources);
 
-      token.requestsRemaining = rateLimit.remaining;
-      token.requestsLimit = rateLimit.limit;
-      token.resetTime = new Date(rateLimit.reset * 1000);
+      if (parsed) {
+        token.requestsRemaining = parsed.remaining;
+        token.requestsLimit = parsed.limit;
+        token.resetTime = parsed.resetTime;
+      } else {
+        token.resetTime = null;
+      }
       token.lastChecked = new Date();
 
-      if (rateLimit.remaining === 0) {
+      if (parsed && parsed.remaining === 0) {
         // token.status = 'rate_limited';
       } else if (token.status === 'rate_limited') {
         token.status = 'active';

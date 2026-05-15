@@ -33,9 +33,13 @@ const logSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+  usersProcessed: {
+    type: Number,
+    default: 0,
+  },
   status: {
     type: String,
-    enum: ['completed', 'error', 'skipped'],
+    enum: ['in_progress', 'completed', 'error', 'skipped'],
     default: 'completed',
   },
   error: String,
