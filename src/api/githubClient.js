@@ -232,6 +232,20 @@ class GitHubClient {
       return null;
     }
   }
+
+  /**
+   * Get authenticated user info
+   * @returns {Promise<Object|null>} Authenticated user info
+   */
+  async getAuthenticatedUser() {
+    try {
+      const response = await this.client.get('/user');
+      return response.data;
+    } catch (error) {
+      this.logger.error(`Error getting authenticated user: ${error.message}`);
+      return null;
+    }
+  }
 }
 
 module.exports = GitHubClient;
