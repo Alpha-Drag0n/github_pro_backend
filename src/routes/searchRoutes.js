@@ -394,6 +394,11 @@ async function executeSearchInBackground(search, selectedToken, io) {
         // Check if it's a token error requiring failover
         const status = comboError.response?.status;
         if (status === 401 || status === 403) {
+          // Mark current token as failed/rate-limited before trying next token
+          const errorReason = `GitHub API error: ${comboError.message}`;
+          await TokenSelector.markTokenError(selectedToken._id, errorReason);
+          logger.warn(`Token ${selectedToken.name} marked as failed. Attempting to select next available token...`);
+
           // Token failed, try to select next one
           const nextToken = await TokenSelector.selectBestToken();
           if (nextToken && nextToken._id.toString() !== token._id.toString()) {
@@ -403,6 +408,9 @@ async function executeSearchInBackground(search, selectedToken, io) {
             searchService.currentToken = nextTokenDoc.token;
             searchService.client = new GitHubClient(nextTokenDoc.token);
 
+            // Update local references for next iteration
+            token.token = nextTokenDoc.token;
+            Object.assign(token, nextTokenDoc.toObject());
             // Update search with new token
             search.tokenId = nextToken._id;
             search.tokenName = nextToken.name;
@@ -412,13 +420,19 @@ async function executeSearchInBackground(search, selectedToken, io) {
             if (io) {
               io.emit('search:token:failover', {
                 searchId: search.searchId,
-                previousToken: token.name,
+                previousToken: selectedToken.name,
                 currentToken: nextToken.name,
               });
             }
           } else {
             throw new Error('No available tokens for failover');
           }
+          
+          // Retry the combination with the new token after a short delay
+          logger.info(`Retrying combination ${combo.location} ${combo.year} with new token...`);
+          await new Promise((resolve) => setTimeout(resolve, 500)); // Brief delay before retry
+          i--; // Decrement loop counter to retry this combination
+          continue; // Skip error logging and move to next iteration (which will retry current combo)
         }
 
         search.searchLog.push({
