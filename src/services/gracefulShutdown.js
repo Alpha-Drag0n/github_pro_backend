@@ -1,5 +1,6 @@
 /**
  * Graceful shutdown for Render deploys, spin-down (SIGTERM), and local Ctrl+C.
+ * Stops search workers immediately; does not wait for in-flight GitHub work.
  */
 
 const Search = require('../models/searchModel');
@@ -10,15 +11,14 @@ const Database = require('../utils/database');
 const { SHUTDOWN_MESSAGE } = require('./searchRecovery');
 const {
   setShuttingDown,
-  pauseAllActiveWorkers,
-  waitForWorkersToFinish,
-  clearAllWorkers,
+  stopAllWorkersImmediately,
   getActiveWorkerCount,
 } = require('./searchWorkerRegistry');
 
 const logger = new Logger();
 
-const GRACEFUL_SHUTDOWN_MS = parseInt(process.env.GRACEFUL_SHUTDOWN_MS || '25000', 10);
+/** Max time to wait for in-flight HTTP connections after workers are stopped. */
+const SERVER_CLOSE_DRAIN_MS = parseInt(process.env.SERVER_CLOSE_DRAIN_MS || '2000', 10);
 
 let shutdownPromise = null;
 
@@ -43,7 +43,11 @@ async function pauseActiveSearchesInDatabase() {
 async function runShutdown(server) {
   stopSelfKeepAlive();
   setShuttingDown(true);
-  logger.info('Graceful shutdown started');
+
+  const activeBeforeStop = getActiveWorkerCount();
+  logger.info(
+    `Graceful shutdown started (${activeBeforeStop} active worker${activeBeforeStop === 1 ? '' : 's'})`
+  );
 
   await recordHealthCheck({
     source: 'shutdown',
@@ -52,21 +56,27 @@ async function runShutdown(server) {
     message: 'Graceful shutdown initiated',
   });
 
-  pauseAllActiveWorkers();
-
-  const remaining = await waitForWorkersToFinish(GRACEFUL_SHUTDOWN_MS);
-  if (remaining > 0) {
-    logger.warn(`${remaining} search worker(s) still active after ${GRACEFUL_SHUTDOWN_MS}ms — forcing DB pause`);
+  const stopped = stopAllWorkersImmediately();
+  if (stopped > 0) {
+    logger.info(`Stopped ${stopped} search worker(s) immediately`);
   }
 
   await pauseActiveSearchesInDatabase();
-  clearAllWorkers();
 
   return new Promise((resolve) => {
-    server.close(() => {
-      logger.info('HTTP server closed');
+    let settled = false;
+    const finish = (label) => {
+      if (settled) return;
+      settled = true;
+      logger.info(label);
       resolve();
-    });
+    };
+
+    server.close(() => finish('HTTP server closed'));
+
+    if (SERVER_CLOSE_DRAIN_MS > 0) {
+      setTimeout(() => finish(`HTTP server close timed out after ${SERVER_CLOSE_DRAIN_MS}ms`), SERVER_CLOSE_DRAIN_MS);
+    }
   });
 }
 
@@ -99,5 +109,5 @@ function registerGracefulShutdown({ server }) {
 
 module.exports = {
   registerGracefulShutdown,
-  GRACEFUL_SHUTDOWN_MS,
+  SERVER_CLOSE_DRAIN_MS,
 };

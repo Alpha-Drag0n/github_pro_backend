@@ -5,6 +5,7 @@
 const HealthLog = require('../models/healthLogModel');
 const Database = require('../utils/database');
 const Logger = require('../utils/logger');
+const { isShuttingDown } = require('./searchWorkerRegistry');
 
 const logger = new Logger();
 
@@ -32,6 +33,10 @@ async function recordHealthCheck({
   message = '',
   status: explicitStatus,
 }) {
+  if (isShuttingDown() && source !== 'shutdown') {
+    return null;
+  }
+
   const status = explicitStatus || deriveStatus(mongoConnected, httpStatus);
 
   const entry = await HealthLog.create({

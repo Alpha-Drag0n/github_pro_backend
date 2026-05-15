@@ -83,20 +83,28 @@ function clearAllWorkers() {
   }
 }
 
-function waitForWorkersToFinish(timeoutMs) {
-  const intervalMs = 500;
-  const deadline = Date.now() + timeoutMs;
+/**
+ * On SIGTERM/SIGINT: flag all workers to stop and clear the registry immediately.
+ * Background async work may still run briefly but must check isShuttingDown().
+ */
+function stopAllWorkersImmediately() {
+  const ids = getActiveSearchIds();
+  for (const state of runningSearches.values()) {
+    state.shouldPause = true;
+  }
+  runningSearches.clear();
+  for (const searchId of ids) {
+    SearchTokenPool.releaseTokenForSearch(searchId);
+  }
+  return ids.length;
+}
 
-  return new Promise((resolve) => {
-    const check = () => {
-      if (runningSearches.size === 0 || Date.now() >= deadline) {
-        resolve(runningSearches.size);
-      } else {
-        setTimeout(check, intervalMs);
-      }
-    };
-    check();
-  });
+function shouldStopWorker(searchId) {
+  if (shuttingDown) {
+    return true;
+  }
+  const state = runningSearches.get(searchId);
+  return Boolean(state?.shouldPause);
 }
 
 module.exports = {
@@ -112,5 +120,6 @@ module.exports = {
   clearShouldPause,
   pauseAllActiveWorkers,
   clearAllWorkers,
-  waitForWorkersToFinish,
+  stopAllWorkersImmediately,
+  shouldStopWorker,
 };
