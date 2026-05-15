@@ -14,13 +14,18 @@ const TokenSelector = require('../services/tokenSelector');
 const SearchTokenPool = require('../services/searchTokenPool');
 const UserSearchService = require('../services/userSearchService');
 const EmailExtractorService = require('../services/emailExtractorService');
+const {
+  isShuttingDown,
+  getActiveWorkerCount,
+  hasActiveWorker,
+  tryAcquireSearchWorker,
+  releaseSearchWorker,
+  getSearchWorkerState,
+  clearShouldPause,
+} = require('../services/searchWorkerRegistry');
 
 const logger = new Logger();
 
-// Track running searches to support pause/resume
-const runningSearches = new Map(); // Map<searchId, { shouldPause, startedAt }>
-
-const MAX_CONCURRENT_SEARCHES = parseInt(process.env.MAX_CONCURRENT_SEARCHES || '3', 10);
 const TOKEN_ROTATION_DELAY_MS = 500;
 const TOKEN_STANDBY_POLL_MS = 30000;
 const TOKEN_FULL_CYCLE_COOLDOWN_MS = 60000;
@@ -32,26 +37,6 @@ function getSearchComboLogFilter(search, combo) {
     followers: search.parameters.followers || '<30',
     accountType: search.parameters.accountType || 'user',
   };
-}
-
-function tryAcquireSearchWorker(searchId) {
-  if (runningSearches.has(searchId)) {
-    return { ok: false, reason: 'already_running' };
-  }
-  if (runningSearches.size >= MAX_CONCURRENT_SEARCHES) {
-    return {
-      ok: false,
-      reason: 'concurrency_limit',
-      message: `Maximum ${MAX_CONCURRENT_SEARCHES} concurrent searches allowed`,
-    };
-  }
-  runningSearches.set(searchId, { shouldPause: false, startedAt: Date.now() });
-  return { ok: true };
-}
-
-function releaseSearchWorker(searchId) {
-  runningSearches.delete(searchId);
-  SearchTokenPool.releaseTokenForSearch(searchId);
 }
 
 function sleep(ms) {
@@ -68,7 +53,7 @@ function isGitHubTokenError(error) {
  */
 async function waitForAvailableToken(search, io) {
   while (true) {
-    const state = runningSearches.get(search.searchId);
+    const state = getSearchWorkerState(search.searchId);
     if (state?.shouldPause) {
       return null;
     }
@@ -259,7 +244,11 @@ router.post('/searches/:id/execute', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    if (search.status === 'running' || runningSearches.has(search.searchId)) {
+    if (isShuttingDown()) {
+      return res.status(503).json({ error: 'Server is shutting down — try again shortly' });
+    }
+
+    if (search.status === 'running' || hasActiveWorker(search.searchId)) {
       return res.status(400).json({ error: 'Search is already running' });
     }
 
@@ -337,21 +326,18 @@ async function executeSearchInBackground(search, selectedToken, io) {
   let currentCombination = 0;
   const searchId = search.searchId;
 
-  if (!runningSearches.has(searchId)) {
+  if (!hasActiveWorker(searchId)) {
     const acquired = tryAcquireSearchWorker(searchId);
     if (!acquired.ok) {
       logger.warn(`Could not start worker for ${searchId}: ${acquired.reason}`);
       return;
     }
   } else {
-    const state = runningSearches.get(searchId);
-    if (state) {
-      state.shouldPause = false;
-    }
+    clearShouldPause(searchId);
   }
 
   try {
-    logger.info(`Search ${searchId} worker started (${runningSearches.size} active)`);
+    logger.info(`Search ${searchId} worker started (${getActiveWorkerCount()} active)`);
 
     let token = selectedToken ? await Token.findById(selectedToken._id) : null;
     if (!token) {
@@ -387,7 +373,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
     // Execute search with progress tracking
     for (let i = 0; i < combinations.length; i++) {
       // Check if search has been paused
-      const searchState = runningSearches.get(search.searchId);
+      const searchState = getSearchWorkerState(search.searchId);
       if (searchState && searchState.shouldPause) {
         logger.info(`Search ${search.searchId} paused at combination ${currentCombination}/${totalCombinations}`);
         break; // Exit the loop - search will be paused
@@ -474,7 +460,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
         for (const user of users) {
           // Check again if search has been paused while processing users
-          const searchState = runningSearches.get(search.searchId);
+          const searchState = getSearchWorkerState(search.searchId);
           if (searchState && searchState.shouldPause) {
             logger.info(`Search ${search.searchId} paused while processing users`);
             break; // Exit the user processing loop
@@ -650,7 +636,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
 
-    const loopState = runningSearches.get(search.searchId);
+    const loopState = getSearchWorkerState(search.searchId);
     if (loopState?.shouldPause) {
       search.status = 'paused';
       await search.save();
@@ -662,6 +648,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
     // Search completed successfully
     const duration = Date.now() - startTime;
     search.status = 'completed';
+    search.recoverable = false;
     search.completedAt = new Date();
     search.duration = duration;
     await search.save();
@@ -692,7 +679,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
   } catch (error) {
     logger.error(`Search execution error: ${error.message}`);
 
-    const paused = runningSearches.get(searchId)?.shouldPause;
+    const paused = getSearchWorkerState(searchId)?.shouldPause;
     if (paused) {
       search.status = 'paused';
       await search.save();
@@ -714,7 +701,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
       releaseSearchWorker(searchId);
       const fresh = await Search.findOne({ searchId });
-      if (fresh && !runningSearches.has(searchId)) {
+      if (fresh && !hasActiveWorker(searchId)) {
         const acquired = tryAcquireSearchWorker(searchId);
         if (acquired.ok) {
           executeSearchInBackground(fresh, null, io);
@@ -849,8 +836,8 @@ router.delete('/searches/:id', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    if (runningSearches.has(search.searchId)) {
-      const state = runningSearches.get(search.searchId);
+    if (hasActiveWorker(search.searchId)) {
+      const state = getSearchWorkerState(search.searchId);
       if (state) {
         state.shouldPause = true;
       }
@@ -892,7 +879,7 @@ router.post('/searches/:id/pause', async (req, res) => {
     }
 
     // Set pause flag in memory to stop the background execution
-    const searchState = runningSearches.get(search.searchId);
+    const searchState = getSearchWorkerState(search.searchId);
     if (searchState) {
       searchState.shouldPause = true;
       logger.info(`Pause flag set for search ${search.searchId}`);
@@ -935,7 +922,11 @@ router.post('/searches/:id/resume', async (req, res) => {
       });
     }
 
-    if (runningSearches.has(search.searchId)) {
+    if (isShuttingDown()) {
+      return res.status(503).json({ error: 'Server is shutting down — try again shortly' });
+    }
+
+    if (hasActiveWorker(search.searchId)) {
       return res.status(400).json({ error: 'Search is already running' });
     }
 
@@ -1305,5 +1296,7 @@ router.post('/users/filter', async (req, res) => {
     res.status(500).json({ error: 'Failed to filter users' });
   }
 });
+
+router.executeSearchInBackground = executeSearchInBackground;
 
 module.exports = router;

@@ -22,6 +22,8 @@ const healthRoutes = require('./routes/healthRoutes');
 const { authenticate } = require('./middleware/authMiddleware');
 const socketAuthMiddleware = require('./middleware/socketAuthMiddleware');
 const setupSocketHandlers = require('./routes/socketRoutes');
+const { recoverSearchesOnStartup } = require('./services/searchRecovery');
+const { registerGracefulShutdown } = require('./services/gracefulShutdown');
 
 const app = express();
 const server = http.createServer(app);
@@ -121,6 +123,12 @@ async function startServer() {
     logger.info('Initializing tokens from database...');
     const tokenResults = await initializeTokensFromDatabase();
 
+    registerGracefulShutdown({ server });
+
+    await recoverSearchesOnStartup(io, (search, selectedToken) => {
+      searchRoutes.executeSearchInBackground(search, selectedToken, io);
+    });
+
     server.listen(PORT, () => {
       logger.info(`================================`);
       logger.info(`Server running on port ${PORT}`);
@@ -132,6 +140,9 @@ async function startServer() {
       }
       logger.info(`Web UI available at http://localhost:${PORT}`);
       logger.info(`WebSocket support enabled`);
+      logger.info(
+        `Search recovery: AUTO_RESUME_SEARCHES=${process.env.AUTO_RESUME_SEARCHES === 'true' ? 'on' : 'off'}`
+      );
       logger.info(`API Endpoints:`);
       logger.info(`  GET    /health                  - Service health check (public)`);
       logger.info(`  POST   /api/tokens              - Add new token`);

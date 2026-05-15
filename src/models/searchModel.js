@@ -83,6 +83,10 @@ const searchSchema = new mongoose.Schema({
     summary: String,
   },
   error: String,
+  recoverable: {
+    type: Boolean,
+    default: false,
+  },
   startedAt: {
     type: Date,
     default: new Date(),
