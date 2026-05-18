@@ -1370,8 +1370,8 @@ router.post('/users/filter', async (req, res) => {
     const total = await User.countDocuments(filter);
     const users = await User.find(filter)
       .skip(skip)
-      .limit(parseInt(limit))
-      .sort({ extractedAt: -1 });
+      .limit(parseInt(limit));
+      // .sort({ extractedAt: -1 });
 
     logger.info(`Filtered user search: ${total} total results, page ${page}`);
 
