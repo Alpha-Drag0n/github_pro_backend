@@ -1308,7 +1308,7 @@ router.get('/logs/stats', async (req, res) => {
  * Search users with filters
  * POST /api/users/filter
  * Query parameters: page, limit
- * Body: { username, location, company, minFollowers, maxFollowers, minRepos, keyword, email }
+ * Body: { username, location, company, minFollowers, maxFollowers, minRepos, keyword, email, searchId, foundInLocation, foundInYear }
  */
 router.post('/users/filter', async (req, res) => {
   try {
@@ -1322,6 +1322,9 @@ router.post('/users/filter', async (req, res) => {
       minRepos,
       keyword,
       email,
+      searchId,
+      foundInLocation,
+      foundInYear,
     } = req.body;
 
     // Build filter object
@@ -1365,6 +1368,18 @@ router.post('/users/filter', async (req, res) => {
       filter.emails = { $in: [email] };
     }
 
+    if (searchId) {
+      filter.searchId = searchId;
+    }
+
+    if (foundInLocation) {
+      filter['foundIn.location'] = { $regex: foundInLocation, $options: 'i' };
+    }
+
+    if (foundInYear) {
+      filter['foundIn.year'] = parseInt(foundInYear);
+    }
+
     // Execute query with pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const total = await User.countDocuments(filter);
@@ -1389,6 +1404,9 @@ router.post('/users/filter', async (req, res) => {
         minRepos,
         keyword,
         email,
+        searchId,
+        foundInLocation,
+        foundInYear,
       },
       users,
     });
