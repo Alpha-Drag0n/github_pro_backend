@@ -1,5 +1,6 @@
 /**
  * Record and query service health check history.
+ * Optimized: Check every 3 seconds, but only save to DB every 30 seconds
  */
 
 const HealthLog = require('../models/healthLogModel');
@@ -8,6 +9,12 @@ const Logger = require('../utils/logger');
 const { isShuttingDown } = require('./searchWorkerRegistry');
 
 const logger = new Logger();
+
+// Health check batching configuration
+const SAVE_INTERVAL_MS = 30000; // Save to DB every 30 seconds
+let lastSavedTime = 0;
+let currentHealthStatus = null;
+let statusChanged = false;
 
 function deriveStatus(mongoConnected, httpStatus) {
   if (!mongoConnected) {
@@ -23,7 +30,8 @@ function deriveStatus(mongoConnected, httpStatus) {
 }
 
 /**
- * Persist a health check and log to console.
+ * Check health status (called every 3 seconds) but only save periodically
+ * Saves to DB every 30 seconds OR when status changes
  */
 async function recordHealthCheck({
   source = 'http',
@@ -32,6 +40,7 @@ async function recordHealthCheck({
   responseTimeMs = null,
   message = '',
   status: explicitStatus,
+  forceDBWrite = false, // Force immediate save regardless of interval
 }) {
   if (isShuttingDown() && source !== 'shutdown') {
     return null;
@@ -39,14 +48,24 @@ async function recordHealthCheck({
 
   const status = explicitStatus || deriveStatus(mongoConnected, httpStatus);
 
-  const entry = await HealthLog.create({
+  // Store current status in memory
+  const newHealthStatus = {
     status,
     source,
     mongoConnected,
     httpStatus,
     responseTimeMs,
     message,
-  });
+    checkedAt: new Date(),
+  };
+
+  // Check if status changed
+  const statusHasChanged = !currentHealthStatus || currentHealthStatus.status !== status;
+  if (statusHasChanged) {
+    statusChanged = true;
+  }
+
+  currentHealthStatus = newHealthStatus;
 
   const label = status.toUpperCase();
   const parts = [
@@ -70,7 +89,33 @@ async function recordHealthCheck({
     logger.warn(parts.join(' '));
   }
 
-  return entry;
+  // Decide whether to save to DB
+  const now = Date.now();
+  const timeSinceLastSave = now - lastSavedTime;
+  const shouldSaveToDb = forceDBWrite || statusChanged || timeSinceLastSave >= SAVE_INTERVAL_MS;
+
+  if (shouldSaveToDb) {
+    try {
+      const entry = await HealthLog.create({
+        status,
+        source,
+        mongoConnected,
+        httpStatus,
+        responseTimeMs,
+        message,
+      });
+      lastSavedTime = now;
+      statusChanged = false;
+      return entry;
+    } catch (error) {
+      logger.error(`Error saving health log to DB: ${error.message}`);
+      // Continue even if save fails - current status is in memory
+      return null;
+    }
+  }
+
+  // Health check recorded in memory but not saved yet
+  return null;
 }
 
 async function getRecentHealthLogs(limit = 50) {
@@ -81,8 +126,15 @@ async function getLatestHealthLog() {
   return HealthLog.findOne().sort({ createdAt: -1 });
 }
 
+/**
+ * Get current health status (from memory, always fresh)
+ */
+function getCurrentHealthStatus() {
+  return currentHealthStatus;
+}
+
 async function getHealthSummary() {
-  const latest = await getLatestHealthLog();
+  const latest = currentHealthStatus || (await getLatestHealthLog());
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
   const [recentAlive, recentDead, recentTotal] = await Promise.all([
@@ -103,7 +155,7 @@ async function getHealthSummary() {
           httpStatus: latest.httpStatus,
           responseTimeMs: latest.responseTimeMs,
           message: latest.message,
-          checkedAt: latest.createdAt,
+          checkedAt: latest.checkedAt || latest.createdAt,
         }
       : null,
     lastHour: {
@@ -120,5 +172,6 @@ module.exports = {
   recordHealthCheck,
   getRecentHealthLogs,
   getLatestHealthLog,
+  getCurrentHealthStatus,
   getHealthSummary,
 };

@@ -9,6 +9,7 @@ const User = require('../models/userModel');
 const Token = require('../models/tokenModel');
 const Log = require('../models/logModel');
 const Logger = require('../utils/logger');
+const requestLogService = require('../services/requestLogService');
 const { v4: uuidv4 } = require('uuid');
 const TokenSelector = require('../services/tokenSelector');
 const SearchTokenPool = require('../services/searchTokenPool');
@@ -567,6 +568,16 @@ async function executeSearchInBackground(search, selectedToken, io) {
               searchId: search.searchId,
             });
 
+            requestLogService.logDBOperation(
+              'User.findOne',
+              { username: user.login, searchId: search.searchId },
+              'find',
+              0,
+              true,
+              null,
+              search.searchId
+            );
+
             if (existingUser) {
               logger.debug(`User ${user.login} already exists, skipping`);
               skippedUsersCount++;
@@ -617,6 +628,16 @@ async function executeSearchInBackground(search, selectedToken, io) {
             });
 
             await newUser.save();
+            const userSaveDuration = 0; // Will be captured via middleware in production
+            requestLogService.logDBOperation(
+              'User.save',
+              { username: extractedData.username, emails: extractedData.emails.length },
+              'create',
+              userSaveDuration,
+              true,
+              null,
+              search.searchId
+            );
             logger.debug(`Saved user: ${extractedData.username} with ${extractedData.emails.length} emails`);
             newUsersCount++;
 
@@ -627,6 +648,16 @@ async function executeSearchInBackground(search, selectedToken, io) {
             if (!err.message.includes('duplicate key')) {
               logger.warn(`Error saving user ${user.login}: ${err.message}`);
             }
+
+            requestLogService.logDBOperation(
+              'User.save',
+              { username: user.login },
+              'create',
+              0,
+              false,
+              err.message,
+              search.searchId
+            );
           }
         }
 
@@ -664,6 +695,16 @@ async function executeSearchInBackground(search, selectedToken, io) {
         search.results.totalUsersFound = await User.countDocuments({
           searchId: search.searchId,
         });
+
+        requestLogService.logDBOperation(
+          'User.countDocuments',
+          { searchId: search.searchId },
+          'find',
+          0,
+          true,
+          null,
+          search.searchId
+        );
 
         if (!completedIndices.includes(i)) {
           search.progress.completedIndices.push(i);

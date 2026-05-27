@@ -5,15 +5,17 @@
 
 const axios = require('axios');
 const Logger = require('../utils/logger');
+const requestLogService = require('../services/requestLogService');
 
 const BASE_URL = 'https://api.github.com';
 
 class GitHubClient {
-  constructor(token) {
+  constructor(token, searchId = null) {
     if (!token) {
       throw new Error('GitHub token is required. Set GITHUB_TOKEN in .env file');
     }
     this.token = token;
+    this.searchId = searchId;
     this.client = axios.create({
       baseURL: BASE_URL,
       headers: {
@@ -46,34 +48,63 @@ class GitHubClient {
       const maxPages = Math.ceil(maxResults / resultsPerPage); // Up to 10 pages
 
       for (let page = 1; page <= maxPages; page++) {
-        const response = await this.client.get('/search/users', {
-          params: {
-            q: query,
-            per_page: resultsPerPage,
-            page: page,
-            sort: 'joined',
-          },
-        });
+        const startTime = Date.now();
+        try {
+          const response = await this.client.get('/search/users', {
+            params: {
+              q: query,
+              per_page: resultsPerPage,
+              page: page,
+              sort: 'joined',
+            },
+          });
+          const duration = Date.now() - startTime;
 
-        const items = response.data.items || [];
-        if (items.length === 0) {
-          // No more results
-          break;
-        }
+          // Log the API call
+          requestLogService.logGitHubCall(
+            '/search/users',
+            { query, perPage: resultsPerPage, page, sort: 'joined' },
+            'read',
+            duration,
+            true,
+            null,
+            response.status,
+            this.searchId
+          );
 
-        allUsers = allUsers.concat(items);
+          const items = response.data.items || [];
+          if (items.length === 0) {
+            // No more results
+            break;
+          }
 
-        // Stop if we've reached 1000 results
-        if (allUsers.length >= maxResults) {
-          allUsers = allUsers.slice(0, maxResults);
-          break;
-        }
+          allUsers = allUsers.concat(items);
 
-        // Check rate limit before next page
-        const remaining = response.headers['x-ratelimit-remaining'];
-        if (remaining && parseInt(remaining) < 2) {
-          this.logger.warn(`Rate limit approaching (${remaining} remaining), stopping pagination`);
-          break;
+          // Stop if we've reached 1000 results
+          if (allUsers.length >= maxResults) {
+            allUsers = allUsers.slice(0, maxResults);
+            break;
+          }
+
+          // Check rate limit before next page
+          const remaining = response.headers['x-ratelimit-remaining'];
+          if (remaining && parseInt(remaining) < 2) {
+            this.logger.warn(`Rate limit approaching (${remaining} remaining), stopping pagination`);
+            break;
+          }
+        } catch (pageError) {
+          const duration = Date.now() - startTime;
+          requestLogService.logGitHubCall(
+            '/search/users',
+            { query, perPage: resultsPerPage, page, sort: 'joined' },
+            'read',
+            duration,
+            false,
+            pageError.message,
+            pageError.response?.status || null,
+            this.searchId
+          );
+          throw pageError;
         }
       }
 
@@ -95,10 +126,36 @@ class GitHubClient {
    * @returns {Promise<Object>} User details
    */
   async getUser(username) {
+    const startTime = Date.now();
     try {
       const response = await this.client.get(`/users/${username}`);
+      const duration = Date.now() - startTime;
+      
+      requestLogService.logGitHubCall(
+        `/users/${username}`,
+        { username },
+        'read',
+        duration,
+        true,
+        null,
+        response.status,
+        this.searchId
+      );
+      
       return response.data;
     } catch (error) {
+      const duration = Date.now() - startTime;
+      requestLogService.logGitHubCall(
+        `/users/${username}`,
+        { username },
+        'read',
+        duration,
+        false,
+        error.message,
+        error.response?.status || null,
+        this.searchId
+      );
+      
       this.logger.error(`Error getting user ${username}: ${error.message}`);
       throw error;
     }
