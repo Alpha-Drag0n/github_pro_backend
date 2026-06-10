@@ -934,6 +934,10 @@ router.post('/searches/:id/complete', async (req, res) => {
 /**
  * Get users for a search
  */
+/**
+ * Get search with associated users and pagination
+ * GET /api/searches/:id/users
+ */
 router.get('/searches/:id/users', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -951,12 +955,14 @@ router.get('/searches/:id/users', async (req, res) => {
       .limit(limit);
 
     res.json({
-      searchId: search.searchId,
-      total,
-      page,
-      limit,
-      pages: Math.ceil(total / limit),
+      search: search.toObject(),
       users,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
     });
   } catch (error) {
     logger.error(`Error fetching users: ${error.message}`);
