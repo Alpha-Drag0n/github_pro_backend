@@ -467,6 +467,81 @@ class ContactPatternExtractor {
     return /^[a-zA-Z0-9_]{5,32}$/.test(handle);
   }
 
+  /**
+   * Build contact + social data in the exact shape the User schema expects, from one or
+   * more labelled text sources (e.g. bio, README, blog). Maps the flat extractor output
+   * to the schema's field names so values are NOT stripped by Mongoose strict mode:
+   *   contactInfo.emails    -> { email, sources, confidence }
+   *   contactInfo.phone     -> { number, sources, confidence }
+   *   contactInfo.discord   -> { handle, sources }
+   *   contactInfo.telegram  -> { username, sources }
+   *   contactInfo.whatsapp  -> { phone, sources }
+   *   socialProfiles.<net>  -> { url, handle, sources }
+   *
+   * @param {Array<{text: string, source: string}>} textSources
+   * @returns {{ contactInfo: object, socialProfiles: object, summary: object }}
+   */
+  static buildUserContactData(textSources = []) {
+    const emails = [];
+    const phone = [];
+    const discord = [];
+    const telegram = [];
+    const whatsapp = [];
+    const social = { linkedin: [], facebook: [], x: [], youtube: [], instagram: [], tiktok: [] };
+
+    const addValue = (arr, keyField, value, source, extra = {}) => {
+      if (!value) return;
+      const existing = arr.find((i) => i[keyField] === value);
+      if (existing) {
+        existing.sources = [...new Set([...(existing.sources || []), source])];
+      } else {
+        arr.push({ [keyField]: value, sources: [source], ...extra });
+      }
+    };
+
+    const addSocial = (arr, item, source) => {
+      if (!item || (!item.url && !item.handle)) return;
+      const existing = arr.find(
+        (i) => (item.url && i.url === item.url) || (item.handle && i.handle === item.handle)
+      );
+      if (existing) {
+        existing.sources = [...new Set([...(existing.sources || []), source])];
+      } else {
+        arr.push({ url: item.url, handle: item.handle, sources: [source] });
+      }
+    };
+
+    for (const entry of textSources) {
+      const text = entry && entry.text;
+      const source = (entry && entry.source) || 'profile';
+      if (!text || typeof text !== 'string') continue;
+
+      const contact = this.extractContactInfo(text);
+      contact.emails.forEach((v) => addValue(emails, 'email', v, source, { confidence: 'medium' }));
+      contact.phones.forEach((v) => addValue(phone, 'number', v, source, { confidence: 'medium' }));
+      contact.discord.forEach((v) => addValue(discord, 'handle', v, source));
+      contact.telegram.forEach((v) => addValue(telegram, 'username', v, source));
+      contact.whatsapp.forEach((v) => addValue(whatsapp, 'phone', v, source));
+
+      const profiles = this.extractSocialProfiles(text);
+      Object.keys(social).forEach((net) => {
+        (profiles[net] || []).forEach((item) => addSocial(social[net], item, source));
+      });
+    }
+
+    const contactInfo = { emails, phone, discord, telegram, whatsapp };
+    const summary = {
+      emails: emails.length,
+      phone: phone.length,
+      discord: discord.length,
+      telegram: telegram.length,
+      whatsapp: whatsapp.length,
+      social: Object.values(social).reduce((n, arr) => n + arr.length, 0),
+    };
+
+    return { contactInfo, socialProfiles: social, summary };
+  }
+
   static getEmptyResult() {
     return {
       emails: [],

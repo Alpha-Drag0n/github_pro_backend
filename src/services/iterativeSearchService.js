@@ -19,6 +19,7 @@ const Token = require('../models/tokenModel');
 const GitHubClient = require('../api/githubClient');
 const SearchTokenPool = require('./searchTokenPool');
 const TokenSelector = require('./tokenSelector');
+const ContactPatternExtractor = require('./contactPatternExtractor');
 const Logger = require('../utils/logger');
 
 const logger = new Logger();
@@ -318,6 +319,23 @@ class IterativeSearchService {
         locations.add(profile.location.trim());
       }
 
+      // Extract contacts + social profiles from the user's text (bio, blog, company).
+      const { contactInfo, socialProfiles, summary } = ContactPatternExtractor.buildUserContactData([
+        { text: profile?.bio, source: 'bio' },
+        { text: profile?.blog, source: 'blog' },
+        { text: profile?.company, source: 'company' },
+      ]);
+
+      const contactTotal =
+        summary.emails + summary.phone + summary.discord + summary.telegram + summary.whatsapp;
+      if (contactTotal > 0 || summary.social > 0) {
+        logger.info(
+          `[IterativeSearch] ${search.searchId} contacts for ${username}: ` +
+            `emails=${summary.emails} phone=${summary.phone} discord=${summary.discord} ` +
+            `telegram=${summary.telegram} whatsapp=${summary.whatsapp} social=${summary.social}`
+        );
+      }
+
       try {
         const user = new User({
           username,
@@ -334,6 +352,8 @@ class IterativeSearchService {
           public_repos: profile?.public_repos,
           github_created_at: profile?.created_at,
           github_updated_at: profile?.updated_at,
+          contactInfo,
+          socialProfiles,
           foundIn: {
             location: profile?.location || 'Unknown',
             year: profile?.created_at ? new Date(profile.created_at).getFullYear() : undefined,

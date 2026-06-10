@@ -15,6 +15,7 @@ const TokenSelector = require('../services/tokenSelector');
 const SearchTokenPool = require('../services/searchTokenPool');
 const UserSearchService = require('../services/userSearchService');
 const EmailExtractorService = require('../services/emailExtractorService');
+const ContactPatternExtractor = require('../services/contactPatternExtractor');
 const {
   isShuttingDown,
   getActiveWorkerCount,
@@ -602,6 +603,28 @@ async function executeSearchInBackground(search, selectedToken, io) {
             // Track token usage for email extraction (commit search + readme fetch)
             await TokenSelector.updateTokenUsage(token._id, 2);
 
+            // Extract contacts + social profiles from the user's text (bio, README, blog).
+            const { contactInfo, socialProfiles, summary: contactSummary } =
+              ContactPatternExtractor.buildUserContactData([
+                { text: userProfile.bio, source: 'bio' },
+                { text: extractedData.readme, source: 'readme' },
+                { text: userProfile.blog, source: 'blog' },
+                { text: userProfile.company, source: 'company' },
+              ]);
+            const contactOther =
+              contactSummary.phone + contactSummary.discord + contactSummary.telegram + contactSummary.whatsapp;
+            const contactLine =
+              `[Contacts] ${extractedData.username}: emails=${contactSummary.emails} ` +
+              `phone=${contactSummary.phone} discord=${contactSummary.discord} ` +
+              `telegram=${contactSummary.telegram} whatsapp=${contactSummary.whatsapp} ` +
+              `social=${contactSummary.social}`;
+            // Surface at info level when anything was found, so it's easy to verify in logs.
+            if (contactSummary.social > 0 || contactOther > 0) {
+              logger.info(contactLine);
+            } else {
+              logger.debug(contactLine);
+            }
+
             const newUser = new User({
               searchId: search.searchId,
               username: extractedData.username,
@@ -619,6 +642,8 @@ async function executeSearchInBackground(search, selectedToken, io) {
               readme: extractedData.readme,
               emails: extractedData.emails,
               emailMetadata: extractedData.emailMetadata,
+              contactInfo,
+              socialProfiles,
               github_created_at: userProfile.created_at,
               github_updated_at: userProfile.updated_at,
               foundIn: {
@@ -638,7 +663,10 @@ async function executeSearchInBackground(search, selectedToken, io) {
               null,
               search.searchId
             );
-            logger.debug(`Saved user: ${extractedData.username} with ${extractedData.emails.length} emails`);
+            logger.debug(
+              `Saved user: ${extractedData.username} — ${extractedData.emails.length} emails, ` +
+                `${contactSummary.social} social, ${contactSummary.discord + contactSummary.telegram + contactSummary.whatsapp + contactSummary.phone} other contacts`
+            );
             newUsersCount++;
 
             // Rate limit between profile fetches
