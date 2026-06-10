@@ -388,10 +388,13 @@ router.post('/iterative-searches/:id/resume', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    if (!['paused', 'failed'].includes(search.status)) {
+    // Any not-completed search can be resumed (failed, paused, pending, or a stuck
+    // in_progress left over from a restart). The launch guard below rejects a search
+    // that is genuinely still running in this process.
+    if (search.status === 'completed') {
       return res.status(400).json({
         error: 'Cannot resume search',
-        message: 'Search must be in paused or failed status',
+        message: 'Search is already completed',
         currentStatus: search.status,
       });
     }
