@@ -136,6 +136,11 @@ router.post('/iterative-searches', async (req, res) => {
     // Calculate total days
     const totalDays = Math.ceil((to - from) / (1000 * 60 * 60 * 24)) + 1;
 
+    // Each day is split into per-term buckets; progress is tracked at the bucket level.
+    const termSet = 'alnum2';
+    const termCount = iterativeSearchService.generateTerms(termSet).length;
+    const totalBuckets = totalDays * termCount;
+
     const searchId = uuidv4();
     const search = new IterativeSearch({
       searchId,
@@ -147,6 +152,9 @@ router.post('/iterative-searches', async (req, res) => {
       totalDays,
       daysProcessed: 0,
       currentIteration: 0,
+      termSet,
+      totalBuckets,
+      bucketsProcessed: 0,
       excludedLocations: [],
       lastFoundLocations: [],
     });
@@ -155,14 +163,14 @@ router.post('/iterative-searches', async (req, res) => {
 
     requestLogService.logDBOperation(
       'IterativeSearch.save',
-      { searchId, totalDays },
+      { searchId, totalDays, totalBuckets },
       'create',
       0,
       true,
       null
     );
 
-    logger.info(`Iterative search created: ${searchId} (${totalDays} days)`);
+    logger.info(`Iterative search created: ${searchId} (${totalDays} days × ${termCount} terms = ${totalBuckets} buckets)`);
 
     res.status(201).json(serializeSearch(search));
   } catch (error) {

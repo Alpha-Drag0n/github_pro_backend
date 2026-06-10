@@ -44,6 +44,21 @@ const iterativeSearchSchema = new mongoose.Schema({
     type: Number,
     default: 50,
   },
+  // Keyword partitioning: each day is split into per-term buckets before location
+  // exclusion. `termSet` selects the generated list (see iterativeSearchService.generateTerms).
+  termSet: {
+    type: String,
+    default: 'alnum2',
+  },
+  // Progress is tracked at the (day × term) bucket level.
+  totalBuckets: {
+    type: Number,
+    default: 0,
+  },
+  bucketsProcessed: {
+    type: Number,
+    default: 0,
+  },
   // Location tracking
   excludedLocations: [String],
   lastFoundLocations: [String],
