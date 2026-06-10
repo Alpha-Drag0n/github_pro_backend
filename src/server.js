@@ -16,6 +16,7 @@ const Logger = require('./utils/logger');
 const { initializeTokensFromDatabase } = require('./utils/tokenInitializer');
 const tokenRoutes = require('./routes/tokenRoutes');
 const searchRoutes = require('./routes/searchRoutes');
+const miningRoutes = require('./routes/miningRoutes');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const healthRoutes = require('./routes/healthRoutes');
@@ -68,6 +69,7 @@ app.use('/api/admin', adminRoutes);
 // Protected API routes
 app.use('/api', authenticate, tokenRoutes);
 app.use('/api', authenticate, searchRoutes);
+app.use('/api/mining', authenticate, miningRoutes);
 
 // Serve frontend for all non-API routes (client-side routing)
 app.get('*', (req, res) => {
