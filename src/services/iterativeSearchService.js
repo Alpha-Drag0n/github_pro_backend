@@ -8,6 +8,7 @@
 const axios = require('axios');
 const User = require('../models/userModel');
 const IterativeSearch = require('../models/iterativeSearchModel');
+const IterativeSearchLog = require('../models/iterativeSearchLogModel');
 const GitHubClient = require('../api/githubClient');
 const Logger = require('../utils/logger');
 
@@ -62,9 +63,44 @@ class IterativeSearchService {
       }
 
       const createdDate = day.toISOString().split('T')[0];
+      const dayDate = new Date(`${createdDate}T00:00:00.000Z`);
 
+      // Cross-search dedup: if ANY search already finished this exact day, skip the
+      // GitHub work entirely. Each created-day is processed only once across all searches.
+      const finishedElsewhere = await IterativeSearchLog.findOne({
+        date: dayDate,
+        status: 'finish',
+      });
+
+      if (finishedElsewhere) {
+        logger.info(
+          `[IterativeSearch] ${searchId} skipping ${createdDate} — already finished by search ${finishedElsewhere.searchId}`
+        );
+        await this.upsertDayLog(search._id, dayDate, {
+          iteration: 0,
+          status: 'finish',
+          usersProcessed: 0,
+          usersFound: 0,
+          excludedLocations: [],
+          completedAt: new Date(),
+          duration: 0,
+          error: `Skipped — day already processed by search ${finishedElsewhere.searchId}`,
+        });
+        await this.advanceDay({ search, createdDate, excludedLocations, io });
+        continue;
+      }
+
+      // Mark this day as started for this search.
+      const dayStartedAt = Date.now();
+      const dayLog = await this.upsertDayLog(search._id, dayDate, {
+        iteration: 0,
+        status: 'start',
+        timestamp: new Date(),
+      });
+
+      let dayUsersProcessed = 0;
       try {
-        await this.processDay({
+        dayUsersProcessed = await this.processDay({
           search,
           client,
           token,
@@ -75,6 +111,12 @@ class IterativeSearchService {
         });
       } catch (error) {
         logger.error(`[IterativeSearch] ${searchId} failed on ${createdDate}: ${error.message}`);
+        await this.upsertDayLog(search._id, dayDate, {
+          status: 'error',
+          error: error.message,
+          completedAt: new Date(),
+          duration: Date.now() - dayStartedAt,
+        });
         search.status = 'failed';
         search.error = `Failed on ${createdDate}: ${error.message}`;
         search.errorDetails = { lastErrorAt: new Date(), errorCount: (search.errorDetails?.errorCount || 0) + 1 };
@@ -84,12 +126,23 @@ class IterativeSearchService {
       }
 
       // The day may have been paused/deleted mid-processing — re-check before saving
-      // so we don't clobber a 'paused' status back to 'in_progress'.
+      // so we don't clobber a 'paused' status back to 'in_progress' or mark the day finished.
       const afterDay = await IterativeSearch.findById(search._id).select('status');
       if (!afterDay || afterDay.status !== 'in_progress') {
         logger.info(`[IterativeSearch] ${searchId} stopping after ${createdDate} (status=${afterDay ? afterDay.status : 'deleted'})`);
         return { status: afterDay ? afterDay.status : 'deleted', usersFound: search.usersFound || 0 };
       }
+
+      // Mark the day finished for this search (enables cross-search dedup + resume).
+      await this.upsertDayLog(search._id, dayDate, {
+        status: 'finish',
+        usersProcessed: dayUsersProcessed,
+        usersFound: dayUsersProcessed,
+        excludedLocations: Array.from(excludedLocations),
+        completedAt: new Date(),
+        duration: Date.now() - dayStartedAt,
+        error: null,
+      });
 
       // Persist per-day progress.
       search.daysProcessed = (search.daysProcessed || 0) + 1;
@@ -136,6 +189,7 @@ class IterativeSearchService {
   async processDay({ search, client, token, createdDate, accountType, excludedLocations, io }) {
     const maxIterations = search.maxIterations || 50;
     let iteration = 0;
+    let usersProcessed = 0;
 
     while (iteration < maxIterations) {
       iteration += 1;
@@ -143,7 +197,7 @@ class IterativeSearchService {
       // Honor pause / delete between iterations of a long day.
       const live = await IterativeSearch.findById(search._id).select('status');
       if (!live || live.status !== 'in_progress') {
-        return;
+        return usersProcessed;
       }
 
       const query = this.buildSearchQuery(createdDate, accountType, Array.from(excludedLocations));
@@ -154,13 +208,14 @@ class IterativeSearchService {
       }
 
       // Fetch profiles (search API omits location) and persist users.
-      const newLocations = await this.saveResults({
+      const { locations: newLocations, processed } = await this.saveResults({
         search,
         client,
         results,
         iteration,
         excludedLocations: Array.from(excludedLocations),
       });
+      usersProcessed += processed;
 
       const freshLocations = newLocations.filter((loc) => !excludedLocations.has(loc));
       freshLocations.forEach((loc) => excludedLocations.add(loc));
@@ -176,6 +231,8 @@ class IterativeSearchService {
         break;
       }
     }
+
+    return usersProcessed;
   }
 
   /**
@@ -184,23 +241,13 @@ class IterativeSearchService {
    */
   async saveResults({ search, client, results, iteration, excludedLocations }) {
     const locations = new Set();
+    let processed = 0;
 
     for (let index = 0; index < results.length; index++) {
       const item = results[index];
       const username = item.login;
       if (!username) {
         continue;
-      }
-
-      let profile = null;
-      try {
-        profile = await client.getUserProfile(username);
-      } catch (error) {
-        logger.warn(`[IterativeSearch] Could not fetch profile for ${username}: ${error.message}`);
-      }
-
-      if (profile?.location && profile.location.trim()) {
-        locations.add(profile.location.trim());
       }
 
       const historyEntry = {
@@ -211,14 +258,46 @@ class IterativeSearchService {
         resultPosition: index + 1,
       };
 
-      try {
-        const existing = await User.findOne({ username, searchId: search.searchId });
-        if (existing) {
-          existing.searchIterationHistory.push(historyEntry);
-          await existing.save();
-          continue;
-        }
+      // Already processed for THIS search → nothing to do.
+      const existingForSearch = await User.findOne({ username, searchId: search.searchId });
+      if (existingForSearch) {
+        processed += 1;
+        continue;
+      }
 
+      // Already processed by ANOTHER search → reuse stored profile, skip the API call.
+      const existingAnywhere = await User.findOne({ username }).sort({ extractedAt: 1 });
+
+      let profile = null;
+      if (existingAnywhere) {
+        profile = {
+          name: existingAnywhere.displayName,
+          avatar_url: existingAnywhere.avatar_url,
+          bio: existingAnywhere.bio,
+          company: existingAnywhere.company,
+          blog: existingAnywhere.blog,
+          location: existingAnywhere.location,
+          followers: existingAnywhere.followers,
+          following: existingAnywhere.following,
+          public_repos: existingAnywhere.public_repos,
+          created_at: existingAnywhere.github_created_at,
+          updated_at: existingAnywhere.github_updated_at,
+        };
+      } else {
+        try {
+          profile = await client.getUserProfile(username);
+        } catch (error) {
+          logger.warn(`[IterativeSearch] Could not fetch profile for ${username}: ${error.message}`);
+        }
+        // Only the live API path needs throttling.
+        await this.sleep(PROFILE_FETCH_DELAY_MS);
+      }
+
+      if (profile?.location && profile.location.trim()) {
+        locations.add(profile.location.trim());
+      }
+
+      try {
         const user = new User({
           username,
           searchId: search.searchId,
@@ -241,16 +320,15 @@ class IterativeSearchService {
           searchIterationHistory: [historyEntry],
         });
         await user.save();
+        processed += 1;
       } catch (error) {
         if (!error.message.includes('duplicate key')) {
           logger.warn(`[IterativeSearch] Error saving user ${username}: ${error.message}`);
         }
       }
-
-      await this.sleep(PROFILE_FETCH_DELAY_MS);
     }
 
-    return Array.from(locations);
+    return { locations: Array.from(locations), processed };
   }
 
   /**
@@ -311,6 +389,45 @@ class IterativeSearchService {
       headers.Authorization = `token ${token}`;
     }
     return headers;
+  }
+
+  /**
+   * Create or update the per-day log entry for a search (one row per searchId+date).
+   */
+  async upsertDayLog(searchId, date, fields) {
+    return IterativeSearchLog.findOneAndUpdate(
+      { searchId, date },
+      { $set: { searchId, date, ...fields } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  }
+
+  /**
+   * Record progress for a skipped day (already processed by another search) without
+   * doing any GitHub work, then emit a progress event.
+   */
+  async advanceDay({ search, createdDate, excludedLocations, io }) {
+    const live = await IterativeSearch.findById(search._id).select('status');
+    if (!live || live.status !== 'in_progress') {
+      return;
+    }
+
+    search.daysProcessed = (search.daysProcessed || 0) + 1;
+    search.excludedLocations = Array.from(excludedLocations);
+    search.usersFound = await User.countDocuments({ 'searchIterationHistory.searchId': search._id });
+    await search.save();
+
+    this.emit(io, 'iterative-search:progress', {
+      searchId: search.searchId,
+      daysProcessed: search.daysProcessed,
+      totalDays: search.totalDays,
+      usersFound: search.usersFound,
+      excludedLocations: search.excludedLocations.length,
+      percentage: search.totalDays
+        ? Math.round((search.daysProcessed / search.totalDays) * 100)
+        : 0,
+      skipped: createdDate,
+    });
   }
 
   emit(io, event, payload) {
