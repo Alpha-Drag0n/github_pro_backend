@@ -4,7 +4,7 @@
  */
 
 const Token = require('../models/tokenModel');
-const Search = require('../models/searchModel');
+const QuickSearch = require('../models/quickSearchModel');
 
 function setupSocketHandlers(socket, io, logger) {
   // ============================================
@@ -66,7 +66,7 @@ function setupSocketHandlers(socket, io, logger) {
    */
   socket.on('subscribe:searches', async () => {
     try {
-      const searches = await Search.find().sort({ createdAt: -1 });
+      const searches = await QuickSearch.find().sort({ createdAt: -1 });
       socket.emit('searches:updated', searches);
 
       socket.join('searches');
@@ -147,7 +147,7 @@ function setupSocketHandlers(socket, io, logger) {
       });
 
       // Also update global searches list
-      const search = await Search.findOne({ searchId });
+      const search = await QuickSearch.findOne({ searchId });
       if (search) {
         io.to('searches').emit('search:added', search);
       }
@@ -188,7 +188,7 @@ function setupSocketHandlers(socket, io, logger) {
   socket.on('dashboard:stats', async () => {
     try {
       const tokens = await Token.find();
-      const searches = await Search.find();
+      const searches = await QuickSearch.find();
 
       const activeTokens = tokens.filter(t => t.status === 'active' && t.isActive).length;
       let totalUsers = 0;
@@ -220,7 +220,7 @@ function setupSocketHandlers(socket, io, logger) {
   socket.on('dashboard:refresh', async () => {
     try {
       const tokens = await Token.find();
-      const searches = await Search.find();
+      const searches = await QuickSearch.find();
 
       const activeTokens = tokens.filter(t => t.status === 'active' && t.isActive).length;
       let totalUsers = 0;

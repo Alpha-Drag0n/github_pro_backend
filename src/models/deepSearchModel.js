@@ -109,4 +109,4 @@ iterativeSearchSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('IterativeSearch', iterativeSearchSchema);
+module.exports = mongoose.model('DeepSearch', iterativeSearchSchema);

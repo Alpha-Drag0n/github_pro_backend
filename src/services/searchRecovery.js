@@ -2,7 +2,7 @@
  * Startup recovery for searches interrupted by deploy, spin-down, or crash.
  */
 
-const Search = require('../models/searchModel');
+const QuickSearch = require('../models/quickSearchModel');
 const Logger = require('../utils/logger');
 const SearchTokenPool = require('./searchTokenPool');
 const { notifySearchChange } = require('./searchBroadcast');
@@ -34,7 +34,7 @@ function isSearchIncomplete(search) {
  * Mark DB rows that still say "running" but have no live worker (this process just started).
  */
 async function reconcileOrphanedSearches(io) {
-  const orphans = await Search.find({
+  const orphans = await QuickSearch.find({
     status: { $in: ['running', 'awaiting_tokens'] },
   });
 
@@ -45,7 +45,7 @@ async function reconcileOrphanedSearches(io) {
   const now = new Date();
   const ids = orphans.map((s) => s.searchId);
 
-  await Search.updateMany(
+  await QuickSearch.updateMany(
     { searchId: { $in: ids } },
     {
       $set: {
@@ -60,7 +60,7 @@ async function reconcileOrphanedSearches(io) {
   logger.warn(`Reconciled ${orphans.length} orphaned search(es) after startup`);
 
   if (io) {
-    const updated = await Search.find({ searchId: { $in: ids } });
+    const updated = await QuickSearch.find({ searchId: { $in: ids } });
     for (const search of updated) {
       await notifySearchChange(io, search);
     }
@@ -78,7 +78,7 @@ async function autoResumeRecoverableSearches(io, executeSearchInBackground) {
     return { resumed: 0, skipped: 0 };
   }
 
-  const candidates = await Search.find({
+  const candidates = await QuickSearch.find({
     status: 'paused',
     recoverable: true,
   }).sort({ updatedAt: 1 });
@@ -114,7 +114,7 @@ async function autoResumeRecoverableSearches(io, executeSearchInBackground) {
       update.tokenName = token.name;
     }
 
-    const search = await Search.findOneAndUpdate(
+    const search = await QuickSearch.findOneAndUpdate(
       { searchId: candidate.searchId },
       { $set: update },
       { new: true }

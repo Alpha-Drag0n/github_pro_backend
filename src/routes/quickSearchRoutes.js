@@ -4,7 +4,7 @@
 
 const express = require('express');
 const router = express.Router();
-const Search = require('../models/searchModel');
+const QuickSearch = require('../models/quickSearchModel');
 const User = require('../models/userModel');
 const Token = require('../models/tokenModel');
 const Log = require('../models/logModel');
@@ -73,7 +73,7 @@ async function handleWorkerStopped(search, searchId, io) {
     return;
   }
 
-  const latest = await Search.findOne({ searchId });
+  const latest = await QuickSearch.findOne({ searchId });
   if (!latest) {
     if (hasActiveWorker(searchId)) {
       releaseSearchWorker(searchId);
@@ -217,9 +217,9 @@ async function rotateSearchToken(search, searchService, emailExtractor, currentT
 /**
  * Get all searches
  */
-router.get('/searches', async (req, res) => {
+router.get('/quick-searches', async (req, res) => {
   try {
-    const searches = await Search.find().sort({ createdAt: -1 });
+    const searches = await QuickSearch.find().sort({ createdAt: -1 });
     res.json(searches);
   } catch (error) {
     logger.error(`Error fetching searches: ${error.message}`);
@@ -230,9 +230,9 @@ router.get('/searches', async (req, res) => {
 /**
  * Get search by ID
  */
-router.get('/searches/:id', async (req, res) => {
+router.get('/quick-searches/:id', async (req, res) => {
   try {
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -246,7 +246,7 @@ router.get('/searches/:id', async (req, res) => {
 /**
  * Create new search
  */
-router.post('/searches', async (req, res) => {
+router.post('/quick-searches', async (req, res) => {
   try {
     const { locations, startYear, endYear, accountType, followers } = req.body;
 
@@ -257,7 +257,7 @@ router.post('/searches', async (req, res) => {
     const searchId = uuidv4();
     const totalCombinations = locations.length * (endYear - startYear + 1);
 
-    const search = new Search({
+    const search = new QuickSearch({
       searchId,
       parameters: {
         locations,
@@ -289,15 +289,15 @@ router.post('/searches', async (req, res) => {
 
 /**
  * Execute search with automatic token selection
- * POST /api/searches/:id/execute
+ * POST /api/quick-searches/:id/execute
  * Selects best available token and starts search
  */
-router.post('/searches/:id/execute', async (req, res) => {
+router.post('/quick-searches/:id/execute', async (req, res) => {
   let search = null;
   let selectedToken = null;
 
   try {
-    search = await Search.findOne({ searchId: req.params.id });
+    search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -361,7 +361,7 @@ router.post('/searches/:id/execute', async (req, res) => {
       searchId: search.searchId,
       status: search.status,
       tokenName: selectedToken.name,
-      message: 'Search started. Check progress with GET /api/searches/:id',
+      message: 'Search started. Check progress with GET /api/quick-searches/:id',
     });
 
     // Execute search in background
@@ -404,7 +404,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
   }
 
   try {
-    const freshDoc = await Search.findOne({ searchId });
+    const freshDoc = await QuickSearch.findOne({ searchId });
     if (!freshDoc) {
       releaseSearchWorker(searchId);
       return;
@@ -877,7 +877,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
       releaseSearchWorker(searchId);
       if (!isShuttingDown()) {
-        const fresh = await Search.findOne({ searchId });
+        const fresh = await QuickSearch.findOne({ searchId });
         if (fresh && !hasActiveWorker(searchId)) {
           const acquired = tryAcquireSearchWorker(searchId);
           if (acquired.ok) {
@@ -910,10 +910,10 @@ async function executeSearchInBackground(search, selectedToken, io) {
 /**
  * Update search results
  */
-router.patch('/searches/:id/results', async (req, res) => {
+router.patch('/quick-searches/:id/results', async (req, res) => {
   try {
     const { usersFound, usersProcessed, emailsExtracted } = req.body;
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
 
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
@@ -940,10 +940,10 @@ router.patch('/searches/:id/results', async (req, res) => {
 /**
  * Complete search
  */
-router.post('/searches/:id/complete', async (req, res) => {
+router.post('/quick-searches/:id/complete', async (req, res) => {
   try {
     const { duration, outputFiles } = req.body;
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
 
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
@@ -976,15 +976,15 @@ router.post('/searches/:id/complete', async (req, res) => {
  */
 /**
  * Get search with associated users and pagination
- * GET /api/searches/:id/users
+ * GET /api/quick-searches/:id/users
  */
-router.get('/searches/:id/users', async (req, res) => {
+router.get('/quick-searches/:id/users', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -1012,11 +1012,11 @@ router.get('/searches/:id/users', async (req, res) => {
 
 /**
  * Delete search and associated users
- * DELETE /api/searches/:id
+ * DELETE /api/quick-searches/:id
  */
-router.delete('/searches/:id', async (req, res) => {
+router.delete('/quick-searches/:id', async (req, res) => {
   try {
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -1034,7 +1034,7 @@ router.delete('/searches/:id', async (req, res) => {
     logger.info(`Deleted ${userDeleteResult.deletedCount} users for search ${search.searchId}`);
 
     // Delete the search
-    await Search.deleteOne({ searchId: search.searchId });
+    await QuickSearch.deleteOne({ searchId: search.searchId });
     logger.info(`Deleted search: ${search.searchId}`);
 
     res.json({
@@ -1050,11 +1050,11 @@ router.delete('/searches/:id', async (req, res) => {
 
 /**
  * Pause search
- * POST /api/searches/:id/pause
+ * POST /api/quick-searches/:id/pause
  */
-router.post('/searches/:id/pause', async (req, res) => {
+router.post('/quick-searches/:id/pause', async (req, res) => {
   try {
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -1092,12 +1092,12 @@ router.post('/searches/:id/pause', async (req, res) => {
 
 /**
  * Resume search
- * POST /api/searches/:id/resume
+ * POST /api/quick-searches/:id/resume
  * Can resume both paused and failed searches
  */
-router.post('/searches/:id/resume', async (req, res) => {
+router.post('/quick-searches/:id/resume', async (req, res) => {
   try {
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -1174,11 +1174,11 @@ router.post('/searches/:id/resume', async (req, res) => {
 
 /**
  * Get search logs
- * GET /api/searches/:id/logs
+ * GET /api/quick-searches/:id/logs
  */
-router.get('/searches/:id/logs', async (req, res) => {
+router.get('/quick-searches/:id/logs', async (req, res) => {
   try {
-    const search = await Search.findOne({ searchId: req.params.id });
+    const search = await QuickSearch.findOne({ searchId: req.params.id });
     if (!search) {
       return res.status(404).json({ error: 'Search not found' });
     }
@@ -1412,10 +1412,18 @@ router.post('/users/filter', async (req, res) => {
       searchId,
       foundInLocation,
       foundInYear,
+      source, // 'quick' | 'deep' | 'all' — which engine found the user
     } = req.body;
 
     // Build filter object
     const filter = {};
+
+    // Deep Search populates searchIterationHistory; Quick Search does not.
+    if (source === 'deep') {
+      filter['searchIterationHistory.0'] = { $exists: true };
+    } else if (source === 'quick') {
+      filter['searchIterationHistory.0'] = { $exists: false };
+    }
 
     if (username) {
       filter.username = { $regex: username, $options: 'i' };
@@ -1494,6 +1502,7 @@ router.post('/users/filter', async (req, res) => {
         searchId,
         foundInLocation,
         foundInYear,
+        source,
       },
       users,
     });

@@ -13,8 +13,8 @@
 
 const axios = require('axios');
 const User = require('../models/userModel');
-const IterativeSearch = require('../models/iterativeSearchModel');
-const IterativeSearchLog = require('../models/iterativeSearchLogModel');
+const DeepSearch = require('../models/deepSearchModel');
+const DeepSearchLog = require('../models/deepSearchLogModel');
 const Token = require('../models/tokenModel');
 const GitHubClient = require('../api/githubClient');
 const SearchTokenPool = require('./searchTokenPool');
@@ -57,12 +57,12 @@ class IterativeSearchService {
   }
 
   /**
-   * Run an iterative search across the full date range of an IterativeSearch document.
+   * Run an iterative search across the full date range of an DeepSearch document.
    * Walks day → term bucket; updates progress and emits socket events as it goes.
    * Stops gracefully if the search is paused/deleted (status leaves 'in_progress').
    *
    * @param {object} params
-   * @param {object} params.search - IterativeSearch mongoose document
+   * @param {object} params.search - DeepSearch mongoose document
    * @param {object} params.token  - Token document ({ _id, token, name })
    * @param {object} [params.io]   - Socket.io instance for progress events
    * @returns {Promise<{ status: string, usersFound: number }>}
@@ -82,7 +82,7 @@ class IterativeSearchService {
     };
 
     logger.info(
-      `[IterativeSearch] Starting range search ${searchId} with token ${token.name} (${terms.length} terms/day)`
+      `[DeepSearch] Starting range search ${searchId} with token ${token.name} (${terms.length} terms/day)`
     );
 
     const fromDate = new Date(search.dateRange.fromDate);
@@ -98,21 +98,21 @@ class IterativeSearchService {
 
       for (const term of terms) {
         // Honor pause / delete before each bucket.
-        const live = await IterativeSearch.findById(search._id).select('status');
+        const live = await DeepSearch.findById(search._id).select('status');
         if (!live || live.status !== 'in_progress') {
-          logger.info(`[IterativeSearch] ${searchId} stopping (status=${live ? live.status : 'deleted'})`);
+          logger.info(`[DeepSearch] ${searchId} stopping (status=${live ? live.status : 'deleted'})`);
           return { status: live ? live.status : 'deleted', usersFound: search.usersFound || 0 };
         }
 
         // Resume: this search already finished this exact bucket → skip (already counted).
-        const ownLog = await IterativeSearchLog.findOne({ searchId: search._id, date: dayDate, term }).select('status');
+        const ownLog = await DeepSearchLog.findOne({ searchId: search._id, date: dayDate, term }).select('status');
         if (ownLog && ownLog.status === 'finish') {
           continue;
         }
 
         // Cross-search dedup: another search already finished this (day, term) → skip the
         // GitHub work, record a skipped bucket, and advance progress.
-        const finishedElsewhere = await IterativeSearchLog.findOne({
+        const finishedElsewhere = await DeepSearchLog.findOne({
           date: dayDate,
           term,
           status: 'finish',
@@ -146,7 +146,7 @@ class IterativeSearchService {
         try {
           bucketCreated = await this.processBucket(ctx, { createdDate, term, accountType });
         } catch (error) {
-          logger.error(`[IterativeSearch] ${searchId} failed on ${createdDate}/${term}: ${error.message}`);
+          logger.error(`[DeepSearch] ${searchId} failed on ${createdDate}/${term}: ${error.message}`);
           await this.upsertBucketLog(search._id, dayDate, term, {
             status: 'error',
             error: error.message,
@@ -157,15 +157,15 @@ class IterativeSearchService {
           search.error = `Failed on ${createdDate} (term ${term}): ${error.message}`;
           search.errorDetails = { lastErrorAt: new Date(), errorCount: (search.errorDetails?.errorCount || 0) + 1 };
           await search.save();
-          this.emit(io, 'iterative-search:failed', { searchId, error: search.error });
+          this.emit(io, 'deep-search:failed', { searchId, error: search.error });
           return { status: 'failed', usersFound: search.usersFound || 0 };
         }
 
         // The bucket may have been paused/deleted mid-processing — re-check before marking
         // it finished, so we don't clobber a 'paused' status or record a partial bucket.
-        const afterBucket = await IterativeSearch.findById(search._id).select('status');
+        const afterBucket = await DeepSearch.findById(search._id).select('status');
         if (!afterBucket || afterBucket.status !== 'in_progress') {
-          logger.info(`[IterativeSearch] ${searchId} stopping after ${createdDate}/${term} (status=${afterBucket ? afterBucket.status : 'deleted'})`);
+          logger.info(`[DeepSearch] ${searchId} stopping after ${createdDate}/${term} (status=${afterBucket ? afterBucket.status : 'deleted'})`);
           return { status: afterBucket ? afterBucket.status : 'deleted', usersFound: search.usersFound || 0 };
         }
 
@@ -182,13 +182,13 @@ class IterativeSearchService {
       }
 
       // Whole day complete (all terms) — bump the day counter for display.
-      const liveAfterDay = await IterativeSearch.findById(search._id).select('status');
+      const liveAfterDay = await DeepSearch.findById(search._id).select('status');
       if (!liveAfterDay || liveAfterDay.status !== 'in_progress') {
         return { status: liveAfterDay ? liveAfterDay.status : 'deleted', usersFound: search.usersFound || 0 };
       }
       search.daysProcessed = (search.daysProcessed || 0) + 1;
       await search.save();
-      logger.info(`[IterativeSearch] ${searchId} day ${createdDate} complete — ${search.daysProcessed}/${search.totalDays} days`);
+      logger.info(`[DeepSearch] ${searchId} day ${createdDate} complete — ${search.daysProcessed}/${search.totalDays} days`);
     }
 
     search.status = 'completed';
@@ -196,14 +196,14 @@ class IterativeSearchService {
     search.usersFound = await User.countDocuments({ 'searchIterationHistory.searchId': search._id });
     await search.save();
 
-    this.emit(io, 'iterative-search:completed', {
+    this.emit(io, 'deep-search:completed', {
       searchId,
       usersFound: search.usersFound,
       daysProcessed: search.daysProcessed,
       bucketsProcessed: search.bucketsProcessed,
     });
 
-    logger.info(`[IterativeSearch] ${searchId} completed — ${search.usersFound} users found`);
+    logger.info(`[DeepSearch] ${searchId} completed — ${search.usersFound} users found`);
     return { status: 'completed', usersFound: search.usersFound };
   }
 
@@ -223,7 +223,7 @@ class IterativeSearchService {
       iteration += 1;
 
       // Honor pause / delete between iterations of a long bucket.
-      const live = await IterativeSearch.findById(search._id).select('status');
+      const live = await DeepSearch.findById(search._id).select('status');
       if (!live || live.status !== 'in_progress') {
         return created;
       }
@@ -338,7 +338,7 @@ class IterativeSearchService {
         socialProfiles = discovery.socialProfiles;
         repositoriesChecked = discovery.repositoriesChecked;
       } catch (error) {
-        logger.warn(`[IterativeSearch] ${search.searchId} contact discovery failed for ${username}: ${error.message}`);
+        logger.warn(`[DeepSearch] ${search.searchId} contact discovery failed for ${username}: ${error.message}`);
       }
 
       try {
@@ -370,7 +370,7 @@ class IterativeSearchService {
         created += 1;
       } catch (error) {
         if (!error.message.includes('duplicate key')) {
-          logger.warn(`[IterativeSearch] Error saving user ${username}: ${error.message}`);
+          logger.warn(`[DeepSearch] Error saving user ${username}: ${error.message}`);
         }
       }
     }
@@ -415,10 +415,10 @@ class IterativeSearchService {
         const status = error.response?.status;
         if (status === 422) {
           // Invalid query (e.g. too many exclusions) — treat as no more results.
-          logger.warn(`[IterativeSearch] Invalid query, stopping pagination: ${query}`);
+          logger.warn(`[DeepSearch] Invalid query, stopping pagination: ${query}`);
           break;
         }
-        logger.error(`[IterativeSearch] Search error (page ${page}): ${error.message}`);
+        logger.error(`[DeepSearch] Search error (page ${page}): ${error.message}`);
         throw error;
       }
     }
@@ -454,7 +454,7 @@ class IterativeSearchService {
     let attempt = 0;
     while (true) {
       // Stop only if the user paused/deleted the search.
-      const live = await IterativeSearch.findById(ctx.search._id).select('status');
+      const live = await DeepSearch.findById(ctx.search._id).select('status');
       if (!live || live.status !== 'in_progress') {
         return [];
       }
@@ -465,7 +465,7 @@ class IterativeSearchService {
         attempt += 1;
         const status = error.response?.status || 'network';
         logger.warn(
-          `[IterativeSearch] ${ctx.searchId} search error (attempt ${attempt}, ${status}): ${error.message} — switching token and retrying`
+          `[DeepSearch] ${ctx.searchId} search error (attempt ${attempt}, ${status}): ${error.message} — switching token and retrying`
         );
         const rotated = await this.rotateToken(ctx, `search ${status}: ${error.message}`);
         if (!rotated) {
@@ -485,7 +485,7 @@ class IterativeSearchService {
   async getProfileWithRotation(ctx, username) {
     while (true) {
       // Stop only if the user paused/deleted the search.
-      const live = await IterativeSearch.findById(ctx.search._id).select('status');
+      const live = await DeepSearch.findById(ctx.search._id).select('status');
       if (!live || live.status !== 'in_progress') {
         return null;
       }
@@ -496,7 +496,7 @@ class IterativeSearchService {
         if (this.isGitHubTokenError(error)) {
           const status = error.response?.status;
           logger.warn(
-            `[IterativeSearch] ${ctx.searchId} profile ${status} for ${username} — switching token and retrying`
+            `[DeepSearch] ${ctx.searchId} profile ${status} for ${username} — switching token and retrying`
           );
           const rotated = await this.rotateToken(ctx, `profile ${status}: ${error.message}`);
           if (!rotated) {
@@ -505,7 +505,7 @@ class IterativeSearchService {
           continue; // retry with the new token
         }
         // Non-token error (e.g. 404 user not found) — give up on just this profile.
-        logger.warn(`[IterativeSearch] Could not fetch profile for ${username}: ${error.message}`);
+        logger.warn(`[DeepSearch] Could not fetch profile for ${username}: ${error.message}`);
         return null;
       }
     }
@@ -533,12 +533,12 @@ class IterativeSearchService {
       }
       ctx.token = waitedDoc;
       ctx.client = new GitHubClient(waitedDoc.token, ctx.searchId);
-      logger.info(`[IterativeSearch] ${ctx.searchId} resumed on token ${waitedDoc.name}`);
+      logger.info(`[DeepSearch] ${ctx.searchId} resumed on token ${waitedDoc.name}`);
       return true;
     }
 
     if (fullCycle) {
-      logger.info(`[IterativeSearch] ${ctx.searchId} full token cycle — cooling down before retry`);
+      logger.info(`[DeepSearch] ${ctx.searchId} full token cycle — cooling down before retry`);
       await this.sleep(TOKEN_FULL_CYCLE_COOLDOWN_MS);
     } else {
       await this.sleep(TOKEN_ROTATION_DELAY_MS);
@@ -558,12 +558,12 @@ class IterativeSearchService {
 
     ctx.token = nextDoc;
     ctx.client = new GitHubClient(nextDoc.token, ctx.searchId);
-    this.emit(ctx.io, 'iterative-search:token:rotated', {
+    this.emit(ctx.io, 'deep-search:token:rotated', {
       searchId: ctx.searchId,
       currentToken: nextDoc.name,
       fullCycle,
     });
-    logger.info(`[IterativeSearch] ${ctx.searchId} rotated to token ${nextDoc.name}`);
+    logger.info(`[DeepSearch] ${ctx.searchId} rotated to token ${nextDoc.name}`);
     return true;
   }
 
@@ -573,7 +573,7 @@ class IterativeSearchService {
    */
   async waitForAvailableToken(ctx) {
     while (true) {
-      const live = await IterativeSearch.findById(ctx.search._id).select('status');
+      const live = await DeepSearch.findById(ctx.search._id).select('status');
       if (!live || live.status !== 'in_progress') {
         return null;
       }
@@ -586,7 +586,7 @@ class IterativeSearchService {
         }
       }
 
-      logger.info(`[IterativeSearch] ${ctx.searchId} awaiting an available token — retrying in ${TOKEN_STANDBY_POLL_MS / 1000}s`);
+      logger.info(`[DeepSearch] ${ctx.searchId} awaiting an available token — retrying in ${TOKEN_STANDBY_POLL_MS / 1000}s`);
       await this.sleep(TOKEN_STANDBY_POLL_MS);
     }
   }
@@ -595,7 +595,7 @@ class IterativeSearchService {
    * Create or update the per-bucket log entry (one row per searchId + date + term).
    */
   async upsertBucketLog(searchId, date, term, fields) {
-    return IterativeSearchLog.findOneAndUpdate(
+    return DeepSearchLog.findOneAndUpdate(
       { searchId, date, term },
       { $set: { searchId, date, term, ...fields } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -606,7 +606,7 @@ class IterativeSearchService {
    * Advance bucket-level progress (count + users), then emit a progress event.
    */
   async advanceBucket({ search, io, createdDate, term, created }) {
-    const live = await IterativeSearch.findById(search._id).select('status');
+    const live = await DeepSearch.findById(search._id).select('status');
     if (!live || live.status !== 'in_progress') {
       return;
     }
@@ -615,7 +615,7 @@ class IterativeSearchService {
     search.usersFound = (search.usersFound || 0) + (created || 0);
     await search.save();
 
-    this.emit(io, 'iterative-search:progress', {
+    this.emit(io, 'deep-search:progress', {
       searchId: search.searchId,
       daysProcessed: search.daysProcessed,
       totalDays: search.totalDays,

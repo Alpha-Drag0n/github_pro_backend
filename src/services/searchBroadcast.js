@@ -2,7 +2,7 @@
  * WebSocket broadcasts for search list and status changes.
  */
 
-const Search = require('../models/searchModel');
+const QuickSearch = require('../models/quickSearchModel');
 const Logger = require('../utils/logger');
 
 const logger = new Logger();
@@ -24,7 +24,7 @@ async function notifySearchChange(io, search) {
       updatedAt: search.updatedAt,
     });
 
-    const searches = await Search.find().sort({ createdAt: -1 }).limit(100);
+    const searches = await QuickSearch.find().sort({ createdAt: -1 }).limit(100);
     io.emit('searches:updated', searches);
   } catch (error) {
     logger.error(`Search broadcast failed: ${error.message}`);

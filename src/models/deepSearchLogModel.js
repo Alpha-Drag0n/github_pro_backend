@@ -9,7 +9,7 @@ const mongoose = require('mongoose');
 const iterativeSearchLogSchema = new mongoose.Schema({
   searchId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'IterativeSearch',
+    ref: 'DeepSearch',
     required: true,
   },
   date: {
@@ -58,4 +58,4 @@ const iterativeSearchLogSchema = new mongoose.Schema({
 iterativeSearchLogSchema.index({ searchId: 1, date: 1, term: 1 }, { unique: true });
 iterativeSearchLogSchema.index({ date: 1, term: 1, status: 1 });
 
-module.exports = mongoose.model('IterativeSearchLog', iterativeSearchLogSchema);
+module.exports = mongoose.model('DeepSearchLog', iterativeSearchLogSchema);

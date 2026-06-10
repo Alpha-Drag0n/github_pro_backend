@@ -6,14 +6,14 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const IterativeSearch = require('../models/iterativeSearchModel');
-const IterativeSearchLog = require('../models/iterativeSearchLogModel');
+const DeepSearch = require('../models/deepSearchModel');
+const DeepSearchLog = require('../models/deepSearchLogModel');
 const User = require('../models/userModel');
 const Token = require('../models/tokenModel');
 const Logger = require('../utils/logger');
 const requestLogService = require('../services/requestLogService');
 const SearchTokenPool = require('../services/searchTokenPool');
-const iterativeSearchService = require('../services/iterativeSearchService');
+const iterativeSearchService = require('../services/deepSearchService');
 
 const logger = new Logger();
 
@@ -60,7 +60,7 @@ async function launchIterativeSearch(search, io) {
 }
 
 /**
- * Normalize an IterativeSearch document for API responses.
+ * Normalize an DeepSearch document for API responses.
  *
  * The model stores dates nested under `dateRange`, but the frontend reads flat
  * `fromDate` / `toDate` fields. This flattens them to `YYYY-MM-DD` strings while
@@ -84,15 +84,15 @@ function serializeSearch(search) {
 
 /**
  * Get all iterative searches
- * GET /api/iterative-searches
+ * GET /api/deep-searches
  */
-router.get('/iterative-searches', async (req, res) => {
+router.get('/deep-searches', async (req, res) => {
   try {
-    const searches = await IterativeSearch.find()
+    const searches = await DeepSearch.find()
       .sort({ createdAt: -1 });
 
     requestLogService.logDBOperation(
-      'IterativeSearch.find',
+      'DeepSearch.find',
       { count: searches.length },
       'find',
       0,
@@ -108,11 +108,62 @@ router.get('/iterative-searches', async (req, res) => {
 });
 
 /**
+ * Unified Deep Search results — users found across ALL deep searches, with filters.
+ * GET /api/deep-searches/users?page&limit&username&location&email&minFollowers
+ * NOTE: must be declared before '/deep-searches/:id' so "users" isn't read as an id.
+ */
+router.get('/deep-searches/users', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    // Deep Search is the only flow that populates searchIterationHistory.
+    const filter = { 'searchIterationHistory.0': { $exists: true } };
+
+    if (req.query.username) {
+      filter.username = { $regex: req.query.username, $options: 'i' };
+    }
+    if (req.query.location) {
+      filter.location = { $regex: req.query.location, $options: 'i' };
+    }
+    if (req.query.email) {
+      filter['contactInfo.emails.email'] = { $regex: req.query.email, $options: 'i' };
+    }
+    if (req.query.minFollowers) {
+      filter.followers = { $gte: parseInt(req.query.minFollowers) };
+    }
+
+    const total = await User.countDocuments(filter);
+    const users = await User.find(filter)
+      .sort({ extractedAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const totalSearches = await DeepSearch.countDocuments();
+
+    res.json({
+      users,
+      totalSearches,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    logger.error(`Error fetching unified deep-search users: ${error.message}`);
+    res.status(500).json({ error: 'Failed to fetch results' });
+  }
+});
+
+/**
  * Create new iterative search
- * POST /api/iterative-searches
+ * POST /api/deep-searches
  * Body: { fromDate, toDate }
  */
-router.post('/iterative-searches', async (req, res) => {
+router.post('/deep-searches', async (req, res) => {
   try {
     const { fromDate, toDate } = req.body;
 
@@ -142,7 +193,7 @@ router.post('/iterative-searches', async (req, res) => {
     const totalBuckets = totalDays * termCount;
 
     const searchId = uuidv4();
-    const search = new IterativeSearch({
+    const search = new DeepSearch({
       searchId,
       status: 'pending',
       dateRange: {
@@ -162,7 +213,7 @@ router.post('/iterative-searches', async (req, res) => {
     await search.save();
 
     requestLogService.logDBOperation(
-      'IterativeSearch.save',
+      'DeepSearch.save',
       { searchId, totalDays, totalBuckets },
       'create',
       0,
@@ -181,16 +232,16 @@ router.post('/iterative-searches', async (req, res) => {
 
 /**
  * Get iterative search by ID with users
- * GET /api/iterative-searches/:id/users
+ * GET /api/deep-searches/:id/users
  */
-router.get('/iterative-searches/:id/users', async (req, res) => {
+router.get('/deep-searches/:id/users', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
     // Find by either searchId or MongoDB _id
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -239,11 +290,11 @@ router.get('/iterative-searches/:id/users', async (req, res) => {
 
 /**
  * Get iterative search by ID
- * GET /api/iterative-searches/:id
+ * GET /api/deep-searches/:id
  */
-router.get('/iterative-searches/:id', async (req, res) => {
+router.get('/deep-searches/:id', async (req, res) => {
   try {
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -263,11 +314,11 @@ router.get('/iterative-searches/:id', async (req, res) => {
 
 /**
  * Start iterative search execution
- * POST /api/iterative-searches/:id/start
+ * POST /api/deep-searches/:id/start
  */
-router.post('/iterative-searches/:id/start', async (req, res) => {
+router.post('/deep-searches/:id/start', async (req, res) => {
   try {
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -306,7 +357,7 @@ router.post('/iterative-searches/:id/start', async (req, res) => {
     }
 
     requestLogService.logDBOperation(
-      'IterativeSearch.updateOne',
+      'DeepSearch.updateOne',
       { searchId: search.searchId, newStatus: 'in_progress' },
       'update',
       0,
@@ -330,11 +381,11 @@ router.post('/iterative-searches/:id/start', async (req, res) => {
 
 /**
  * Pause iterative search
- * POST /api/iterative-searches/:id/pause
+ * POST /api/deep-searches/:id/pause
  */
-router.post('/iterative-searches/:id/pause', async (req, res) => {
+router.post('/deep-searches/:id/pause', async (req, res) => {
   try {
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -350,7 +401,7 @@ router.post('/iterative-searches/:id/pause', async (req, res) => {
     await search.save();
 
     requestLogService.logDBOperation(
-      'IterativeSearch.updateOne',
+      'DeepSearch.updateOne',
       { searchId: search.searchId, newStatus: 'paused' },
       'update',
       0,
@@ -373,11 +424,11 @@ router.post('/iterative-searches/:id/pause', async (req, res) => {
 
 /**
  * Resume iterative search
- * POST /api/iterative-searches/:id/resume
+ * POST /api/deep-searches/:id/resume
  */
-router.post('/iterative-searches/:id/resume', async (req, res) => {
+router.post('/deep-searches/:id/resume', async (req, res) => {
   try {
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -417,7 +468,7 @@ router.post('/iterative-searches/:id/resume', async (req, res) => {
     }
 
     requestLogService.logDBOperation(
-      'IterativeSearch.updateOne',
+      'DeepSearch.updateOne',
       { searchId: search.searchId, newStatus: 'in_progress' },
       'update',
       0,
@@ -441,11 +492,11 @@ router.post('/iterative-searches/:id/resume', async (req, res) => {
 
 /**
  * Delete iterative search and associated data
- * DELETE /api/iterative-searches/:id
+ * DELETE /api/deep-searches/:id
  */
-router.delete('/iterative-searches/:id', async (req, res) => {
+router.delete('/deep-searches/:id', async (req, res) => {
   try {
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -457,15 +508,15 @@ router.delete('/iterative-searches/:id', async (req, res) => {
     }
 
     // Delete associated logs
-    const deletedLogs = await IterativeSearchLog.deleteMany({ 
+    const deletedLogs = await DeepSearchLog.deleteMany({ 
       searchId: search._id 
     });
 
     // Delete search
-    await IterativeSearch.deleteOne({ _id: search._id });
+    await DeepSearch.deleteOne({ _id: search._id });
 
     requestLogService.logDBOperation(
-      'IterativeSearch.deleteOne',
+      'DeepSearch.deleteOne',
       { searchId: search.searchId, deletedLogs: deletedLogs.deletedCount },
       'delete',
       0,
@@ -488,11 +539,11 @@ router.delete('/iterative-searches/:id', async (req, res) => {
 
 /**
  * Get iterative search logs
- * GET /api/iterative-searches/:id/logs
+ * GET /api/deep-searches/:id/logs
  */
-router.get('/iterative-searches/:id/logs', async (req, res) => {
+router.get('/deep-searches/:id/logs', async (req, res) => {
   try {
-    const search = await IterativeSearch.findOne({
+    const search = await DeepSearch.findOne({
       $or: [
         { _id: req.params.id },
         { searchId: req.params.id },
@@ -503,7 +554,7 @@ router.get('/iterative-searches/:id/logs', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    const logs = await IterativeSearchLog.find({ searchId: search._id })
+    const logs = await DeepSearchLog.find({ searchId: search._id })
       .sort({ date: 1 });
 
     res.json({

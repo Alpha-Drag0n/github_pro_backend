@@ -3,7 +3,7 @@
  * Stops search workers immediately; does not wait for in-flight GitHub work.
  */
 
-const Search = require('../models/searchModel');
+const QuickSearch = require('../models/quickSearchModel');
 const Logger = require('../utils/logger');
 const { stopSelfKeepAlive } = require('./keepAlive');
 const { recordHealthCheck } = require('./healthLogService');
@@ -23,7 +23,7 @@ const SERVER_CLOSE_DRAIN_MS = parseInt(process.env.SERVER_CLOSE_DRAIN_MS || '200
 let shutdownPromise = null;
 
 async function pauseActiveSearchesInDatabase() {
-  const result = await Search.updateMany(
+  const result = await QuickSearch.updateMany(
     { status: { $in: ['running', 'awaiting_tokens'] } },
     {
       $set: {
