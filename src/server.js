@@ -78,19 +78,31 @@ app.use('/api', authenticate, tokenRoutes);
 app.use('/api', authenticate, searchRoutes);
 app.use('/api/mining', authenticate, miningRoutes);
 
+// API error handler for unmatched API routes
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: 'API endpoint not found',
+    path: req.path,
+    method: req.method,
+    message: 'The requested API endpoint does not exist. Use /health for server status.',
+  });
+});
+
 // Serve frontend for all non-API routes (client-side routing)
+// Only applies when frontend is built; otherwise return 404
 app.get('*', (req, res) => {
+  // Try to serve frontend if it exists
   if (!frontendExists) {
-    return res.status(503).json({
-      error: 'Frontend not available',
-      message: 'Frontend build not found. Backend API is available at /api/health',
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Frontend build not found. API is available at /health or /api/*',
     });
   }
 
   const indexPath = path.join(frontendBuildPath, 'index.html');
   res.sendFile(indexPath, (err) => {
     if (err) {
-      res.status(404).json({ message: 'Frontend not built. Run: npm run build in frontend/' });
+      res.status(404).json({ error: 'Not found' });
     }
   });
 });
