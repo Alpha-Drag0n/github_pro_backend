@@ -9,10 +9,55 @@ const { v4: uuidv4 } = require('uuid');
 const IterativeSearch = require('../models/iterativeSearchModel');
 const IterativeSearchLog = require('../models/iterativeSearchLogModel');
 const User = require('../models/userModel');
+const Token = require('../models/tokenModel');
 const Logger = require('../utils/logger');
 const requestLogService = require('../services/requestLogService');
+const SearchTokenPool = require('../services/searchTokenPool');
+const iterativeSearchService = require('../services/iterativeSearchService');
 
 const logger = new Logger();
+
+/** Guards against launching two background loops for the same search in one process. */
+const runningIterativeSearches = new Set();
+
+/**
+ * Assign a token and run the iterative search in the background (fire-and-forget).
+ * Releases the worker guard and token assignment when finished.
+ */
+async function launchIterativeSearch(search, io) {
+  const searchId = search.searchId;
+
+  if (runningIterativeSearches.has(searchId)) {
+    logger.warn(`Iterative search ${searchId} already running in this process`);
+    return { ok: false, reason: 'already_running' };
+  }
+
+  const selectedToken = await SearchTokenPool.assignTokenForSearch(searchId);
+  if (!selectedToken) {
+    return { ok: false, reason: 'no_token' };
+  }
+
+  const tokenDoc = await Token.findById(selectedToken._id);
+  if (!tokenDoc) {
+    SearchTokenPool.releaseTokenForSearch(searchId);
+    return { ok: false, reason: 'no_token' };
+  }
+
+  runningIterativeSearches.add(searchId);
+
+  // Run in background — do not await.
+  iterativeSearchService
+    .runIterativeRangeSearch({ search, token: tokenDoc, io })
+    .catch((error) => {
+      logger.error(`Iterative search ${searchId} crashed: ${error.message}`);
+    })
+    .finally(() => {
+      runningIterativeSearches.delete(searchId);
+      SearchTokenPool.releaseTokenForSearch(searchId);
+    });
+
+  return { ok: true, tokenName: tokenDoc.name };
+}
 
 /**
  * Normalize an IterativeSearch document for API responses.
@@ -229,10 +274,28 @@ router.post('/iterative-searches/:id/start', async (req, res) => {
       return res.status(400).json({ error: 'Search is already running' });
     }
 
+    if (search.status === 'completed') {
+      return res.status(400).json({ error: 'Search is already completed' });
+    }
+
+    // Assign a token and kick off the background runner BEFORE flipping status,
+    // so we don't mark it running when there is no token to run with.
     search.status = 'in_progress';
     search.startedAt = new Date();
     search.pausedAt = null;
+    search.error = null;
     await search.save();
+
+    const launch = await launchIterativeSearch(search, req.io);
+    if (!launch.ok) {
+      search.status = 'failed';
+      search.error =
+        launch.reason === 'no_token'
+          ? 'No GitHub tokens available — add a token and try again'
+          : 'Search is already running';
+      await search.save();
+      return res.status(launch.reason === 'no_token' ? 400 : 409).json({ error: search.error });
+    }
 
     requestLogService.logDBOperation(
       'IterativeSearch.updateOne',
@@ -243,11 +306,12 @@ router.post('/iterative-searches/:id/start', async (req, res) => {
       null
     );
 
-    logger.info(`Iterative search started: ${search.searchId}`);
+    logger.info(`Iterative search started: ${search.searchId} with token ${launch.tokenName}`);
 
     res.json({
       searchId: search.searchId,
       status: search.status,
+      tokenName: launch.tokenName,
       message: 'Search started',
     });
   } catch (error) {
@@ -316,17 +380,30 @@ router.post('/iterative-searches/:id/resume', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    if (search.status !== 'paused') {
+    if (!['paused', 'failed'].includes(search.status)) {
       return res.status(400).json({
         error: 'Cannot resume search',
-        message: 'Search must be in paused status',
+        message: 'Search must be in paused or failed status',
         currentStatus: search.status,
       });
     }
 
+    const previousStatus = search.status;
     search.status = 'in_progress';
     search.resumedAt = new Date();
+    search.error = null;
     await search.save();
+
+    const launch = await launchIterativeSearch(search, req.io);
+    if (!launch.ok) {
+      search.status = previousStatus;
+      search.error =
+        launch.reason === 'no_token'
+          ? 'No GitHub tokens available — add a token and try again'
+          : 'Search is already running';
+      await search.save();
+      return res.status(launch.reason === 'no_token' ? 400 : 409).json({ error: search.error });
+    }
 
     requestLogService.logDBOperation(
       'IterativeSearch.updateOne',
@@ -337,11 +414,12 @@ router.post('/iterative-searches/:id/resume', async (req, res) => {
       null
     );
 
-    logger.info(`Iterative search resumed: ${search.searchId}`);
+    logger.info(`Iterative search resumed: ${search.searchId} with token ${launch.tokenName}`);
 
     res.json({
       searchId: search.searchId,
       status: search.status,
+      tokenName: launch.tokenName,
       message: 'Search resumed',
     });
   } catch (error) {

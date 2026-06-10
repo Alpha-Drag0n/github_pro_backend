@@ -158,6 +158,7 @@ const userSchema = new mongoose.Schema({
   },
   searchIterationHistory: [
     {
+      searchId: mongoose.Schema.Types.ObjectId, // Reference to the IterativeSearch that found this user
       iterationNumber: Number,
       searchDate: Date,
       excludedLocations: [String],
