@@ -65,20 +65,35 @@ class ContactPatternExtractor {
    * Pattern: standard email regex
    */
   static extractEmails(text) {
-    // Standard email pattern
-    const emailRegex = /[a-zA-Z0-9._%-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    const matches = text.match(emailRegex) || [];
-    
-    // Filter out common false positives
-    return matches.filter(email => {
-      const invalidPatterns = [
-        /^\./, // starts with dot
-        /\.$/, // ends with dot
-        /\.\./,  // double dots
-        /^-/, // starts with dash
-        /@-/, // @ followed by dash
-      ];
-      return !invalidPatterns.some(pattern => pattern.test(email));
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const found = new Set();
+
+    const harvest = (s) => {
+      (s.match(emailRegex) || []).forEach((e) => found.add(e.trim()));
+    };
+
+    // 1. Raw text (also catches mailto:, emails inside HTML comments / <details>, badges).
+    harvest(text);
+
+    // 2. Deobfuscate common deliberate obfuscation, then harvest again.
+    //    Only unambiguous bracketed/entity forms are replaced (safe — won't mangle prose):
+    //    "name [at] domain [dot] com", "name(at)domain(dot)com", "name&#64;domain&#46;com"
+    const deobfuscated = text
+      .replace(/\s*(?:\[\s*at\s*\]|\(\s*at\s*\)|\{\s*at\s*\}|&#0*64;|&commat;)\s*/gi, '@')
+      .replace(/\s*(?:\[\s*dot\s*\]|\(\s*dot\s*\)|\{\s*dot\s*\}|&#0*46;)\s*/gi, '.');
+    if (deobfuscated !== text) {
+      harvest(deobfuscated);
+    }
+
+    // Filter out structural junk and obvious placeholders / GitHub noreply addresses.
+    return [...found].filter((email) => {
+      const lower = email.toLowerCase();
+      const invalidStructure = [/^\./, /\.$/, /\.\./, /^-/, /@-/, /@\./, /\.@/, /@.*@/];
+      if (invalidStructure.some((p) => p.test(email))) return false;
+      if (lower.endsWith('@users.noreply.github.com') || lower.endsWith('@noreply.github.com')) return false;
+      if (/^(example|test|tests?|email|e?mail|name|user|username|your|youremail|someone|foo|bar|info|noreply|no-reply|donotreply)@/.test(lower)) return false;
+      if (/@(example|test|domain|email|yourdomain|sentry\.io|wixpress\.com)\b/.test(lower)) return false;
+      return true;
     });
   }
 
@@ -205,21 +220,11 @@ class ContactPatternExtractor {
       telegramHandles.push(match[1].replace(/^@/, ''));
     }
 
-    // Pattern 2: @username format
-    // @username (5-32 characters)
-    const pattern2 = /@([a-zA-Z0-9_]{5,32})/g;
+    // Pattern 2: Telegram prefix — telegram: username, tg: @username
+    // (A bare "@username" is NOT treated as Telegram: in a README it is almost always a
+    //  GitHub mention, which produced large numbers of false positives.)
+    const pattern2 = /(?:telegram|tg)\s*[:=]?\s*@?([a-zA-Z0-9_]{5,32})/gi;
     while ((match = pattern2.exec(text)) !== null) {
-      const handle = match[1];
-      // Filter out common false positives like @mentions in regular text
-      if (this.isTelegramHandle(handle)) {
-        telegramHandles.push(handle);
-      }
-    }
-
-    // Pattern 3: Telegram prefix
-    // telegram: username, tg: username
-    const pattern3 = /(?:telegram|tg)[:\s]+[@]?([a-zA-Z0-9_]{5,32})/gi;
-    while ((match = pattern3.exec(text)) !== null) {
       telegramHandles.push(match[1].replace(/^@/, ''));
     }
 
@@ -319,12 +324,13 @@ class ContactPatternExtractor {
       }
     }
 
-    // Pattern 3: @handle mentions (Twitter style)
-    // @username but not email-like
-    const pattern3 = /(?:^|\s)@([a-zA-Z0-9_]{1,15})(?:\s|$|[^\w@.])/g;
+    // Pattern 3: explicit context — "twitter: @handle", "x: handle", "𝕏 @handle"
+    // (A bare "@handle" is NOT treated as Twitter/X: in a README it is almost always a
+    //  GitHub mention or an npm scope, which produced large numbers of false positives.)
+    const pattern3 = /(?:twitter|x)\s*[:=]\s*@?([a-zA-Z0-9_]{1,15})\b/gi;
     while ((match = pattern3.exec(text)) !== null) {
       const handle = match[1];
-      if (!xProfiles.some(p => p.handle === handle) && !handle.includes('.')) {
+      if (!xProfiles.some((p) => p.handle === handle) && !handle.includes('.')) {
         xProfiles.push({
           url: `https://x.com/${handle}`,
           handle: handle,

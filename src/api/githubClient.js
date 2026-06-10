@@ -260,6 +260,68 @@ class GitHubClient {
   }
 
   /**
+   * Get a repository's README together with its exact source URL.
+   * Uses the JSON form of the readme endpoint so we get the html_url (exact blob URL) and
+   * decode the full raw content (base64) — nothing is stripped, so HTML comments / hidden
+   * <details> blocks are preserved for extraction.
+   * @returns {Promise<{ content: string, htmlUrl: string, downloadUrl: string, path: string } | null>}
+   */
+  async getReadmeWithMeta(owner, repo) {
+    try {
+      const response = await this.client.get(`/repos/${owner}/${repo}/readme`);
+      const data = response.data || {};
+      let content = '';
+      if (data.content) {
+        content = Buffer.from(data.content, data.encoding || 'base64').toString('utf-8');
+      }
+      return {
+        content,
+        htmlUrl: data.html_url || null,
+        downloadUrl: data.download_url || null,
+        path: data.path || 'README',
+      };
+    } catch (error) {
+      const status = error.response?.status;
+      // 404 = no README (normal). Auth/rate-limit errors are rethrown so callers can rotate.
+      if (status === 404) {
+        return null;
+      }
+      if (status === 401 || status === 403 || status === 429) {
+        throw error;
+      }
+      this.logger.error(`Error getting README meta for ${owner}/${repo}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * List a user's public repositories (owner type), newest first, paginated.
+   * @returns {Promise<Array>} repos with html_url, name, description, fork, updated_at
+   */
+  async getUserRepos(username, perPage = 100, maxPages = 30) {
+    const repos = [];
+    for (let page = 1; page <= maxPages; page++) {
+      try {
+        const response = await this.client.get(`/users/${username}/repos`, {
+          params: { page, per_page: perPage, sort: 'updated', direction: 'desc', type: 'owner' },
+        });
+        const items = response.data || [];
+        repos.push(...items);
+        if (items.length < perPage) break;
+      } catch (error) {
+        const status = error.response?.status;
+        // Auth/rate-limit errors are rethrown so callers can rotate the token and retry.
+        if (status === 401 || status === 403 || status === 429) {
+          throw error;
+        }
+        this.logger.error(`Error listing repos for ${username}: ${error.message}`);
+        break;
+      }
+    }
+    return repos;
+  }
+
+  /**
    * Get commit details
    * @param {string} owner - Repository owner
    * @param {string} repo - Repository name

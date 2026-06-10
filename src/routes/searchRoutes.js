@@ -15,7 +15,7 @@ const TokenSelector = require('../services/tokenSelector');
 const SearchTokenPool = require('../services/searchTokenPool');
 const UserSearchService = require('../services/userSearchService');
 const EmailExtractorService = require('../services/emailExtractorService');
-const ContactPatternExtractor = require('../services/contactPatternExtractor');
+const contactDiscoveryService = require('../services/contactDiscoveryService');
 const {
   isShuttingDown,
   getActiveWorkerCount,
@@ -603,26 +603,38 @@ async function executeSearchInBackground(search, selectedToken, io) {
             // Track token usage for email extraction (commit search + readme fetch)
             await TokenSelector.updateTokenUsage(token._id, 2);
 
-            // Extract contacts + social profiles from the user's text (bio, README, blog).
-            const { contactInfo, socialProfiles, summary: contactSummary } =
-              ContactPatternExtractor.buildUserContactData([
-                { text: userProfile.bio, source: 'bio' },
-                { text: extractedData.readme, source: 'readme' },
-                { text: userProfile.blog, source: 'blog' },
-                { text: userProfile.company, source: 'company' },
-              ]);
-            const contactOther =
-              contactSummary.phone + contactSummary.discord + contactSummary.telegram + contactSummary.whatsapp;
-            const contactLine =
-              `[Contacts] ${extractedData.username}: emails=${contactSummary.emails} ` +
-              `phone=${contactSummary.phone} discord=${contactSummary.discord} ` +
-              `telegram=${contactSummary.telegram} whatsapp=${contactSummary.whatsapp} ` +
-              `social=${contactSummary.social}`;
-            // Surface at info level when anything was found, so it's easy to verify in logs.
-            if (contactSummary.social > 0 || contactOther > 0) {
-              logger.info(contactLine);
-            } else {
-              logger.debug(contactLine);
+            // Deep contact/social discovery: scan the profile + every (non-fork) repo's
+            // README & description, recording the exact source URL for each finding.
+            let contactInfo;
+            let socialProfiles;
+            let repositoriesChecked = 0;
+            try {
+              const discovery = await contactDiscoveryService.discoverContacts(
+                searchService.client,
+                user.login,
+                {
+                  profile: userProfile,
+                  tag: search.searchId,
+                  rotate: async (reason) => {
+                    const nextTokenDoc = await rotateSearchToken(
+                      search,
+                      searchService,
+                      emailExtractor,
+                      token,
+                      io,
+                      reason
+                    );
+                    if (!nextTokenDoc) return null;
+                    token = nextTokenDoc;
+                    return searchService.client;
+                  },
+                }
+              );
+              contactInfo = discovery.contactInfo;
+              socialProfiles = discovery.socialProfiles;
+              repositoriesChecked = discovery.repositoriesChecked;
+            } catch (discoveryError) {
+              logger.warn(`Contact discovery failed for ${user.login}: ${discoveryError.message}`);
             }
 
             const newUser = new User({
@@ -644,6 +656,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               emailMetadata: extractedData.emailMetadata,
               contactInfo,
               socialProfiles,
+              repositoryMining: { repositoriesChecked, lastMiningDate: new Date() },
               github_created_at: userProfile.created_at,
               github_updated_at: userProfile.updated_at,
               foundIn: {
@@ -664,8 +677,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               search.searchId
             );
             logger.debug(
-              `Saved user: ${extractedData.username} — ${extractedData.emails.length} emails, ` +
-                `${contactSummary.social} social, ${contactSummary.discord + contactSummary.telegram + contactSummary.whatsapp + contactSummary.phone} other contacts`
+              `Saved user: ${extractedData.username} — ${extractedData.emails.length} emails (commits/bio/readme), scanned ${repositoriesChecked} repos for contacts`
             );
             newUsersCount++;
 
