@@ -17,6 +17,7 @@ const Logger = require('./utils/logger');
 const { initializeTokensFromDatabase } = require('./utils/tokenInitializer');
 const tokenRoutes = require('./routes/tokenRoutes');
 const searchRoutes = require('./routes/searchRoutes');
+const iterativeSearchRoutes = require('./routes/iterativeSearchRoutes');
 const miningRoutes = require('./routes/miningRoutes');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
@@ -76,6 +77,7 @@ app.use('/api/admin', adminRoutes);
 // Protected API routes
 app.use('/api', authenticate, tokenRoutes);
 app.use('/api', authenticate, searchRoutes);
+app.use('/api', authenticate, iterativeSearchRoutes);
 app.use('/api/mining', authenticate, miningRoutes);
 
 // API error handler for unmatched API routes
