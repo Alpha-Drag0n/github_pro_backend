@@ -9,6 +9,7 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const socketIo = require('socket.io');
 const Database = require('./utils/database');
@@ -53,9 +54,15 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
-// Serve frontend build in production
+// Serve frontend build in production (optional - only if built)
 const frontendBuildPath = path.join(__dirname, '../../frontend/dist');
-app.use(express.static(frontendBuildPath));
+const frontendExists = fs.existsSync(frontendBuildPath);
+
+if (frontendExists) {
+  app.use(express.static(frontendBuildPath));
+} else {
+  logger.warn('Frontend build not found at ' + frontendBuildPath + ' - frontend routes will not be served');
+}
 
 // Public health check (no auth)
 app.use('/health', healthRoutes);
@@ -73,6 +80,13 @@ app.use('/api/mining', authenticate, miningRoutes);
 
 // Serve frontend for all non-API routes (client-side routing)
 app.get('*', (req, res) => {
+  if (!frontendExists) {
+    return res.status(503).json({
+      error: 'Frontend not available',
+      message: 'Frontend build not found. Backend API is available at /api/health',
+    });
+  }
+
   const indexPath = path.join(frontendBuildPath, 'index.html');
   res.sendFile(indexPath, (err) => {
     if (err) {
