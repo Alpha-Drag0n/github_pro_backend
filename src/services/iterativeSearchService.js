@@ -29,11 +29,11 @@ const PROFILE_FETCH_DELAY_MS = 120; // Be gentle on the rate limit between profi
 const DAY_MS = 1000 * 60 * 60 * 24;
 const ALNUM = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
-// Token rotation (mirrors the regular search worker).
+// Token rotation (mirrors the regular search worker). Rotation retries indefinitely —
+// a token/rate-limit/transient error never fails the search; only a user pause/delete stops it.
 const TOKEN_ROTATION_DELAY_MS = 500;
 const TOKEN_STANDBY_POLL_MS = 30000;
 const TOKEN_FULL_CYCLE_COOLDOWN_MS = 60000;
-const MAX_TOKEN_ROTATIONS_PER_CALL = 12; // safety cap per single GitHub call
 
 class IterativeSearchService {
   /**
@@ -418,48 +418,70 @@ class IterativeSearchService {
   }
 
   /**
-   * Run a user search, rotating to the next token on auth/rate-limit errors and retrying.
+   * Run a user search that NEVER gives up on errors: on any failure it rotates to the next
+   * token and tries again, around and around (with the pool's full-cycle cooldown), until it
+   * succeeds. The ONLY thing that stops it is the user pausing/deleting the search — in which
+   * case it returns [] so the caller unwinds cleanly. The search is never marked 'failed'
+   * because of a token/rate-limit/transient error.
    */
   async searchUsersWithRotation(ctx, query) {
-    let attempts = 0;
+    let attempt = 0;
     while (true) {
+      // Stop only if the user paused/deleted the search.
+      const live = await IterativeSearch.findById(ctx.search._id).select('status');
+      if (!live || live.status !== 'in_progress') {
+        return [];
+      }
+
       try {
         return await this.searchUsers(query, ctx.token.token);
       } catch (error) {
-        if (this.isGitHubTokenError(error) && attempts < MAX_TOKEN_ROTATIONS_PER_CALL) {
-          attempts += 1;
-          const rotated = await this.rotateToken(ctx, `search ${error.response?.status}: ${error.message}`);
-          if (!rotated) {
-            throw error; // search was paused/stopped while waiting for a token
-          }
-          continue;
+        attempt += 1;
+        const status = error.response?.status || 'network';
+        logger.warn(
+          `[IterativeSearch] ${ctx.searchId} search error (attempt ${attempt}, ${status}): ${error.message} — switching token and retrying`
+        );
+        const rotated = await this.rotateToken(ctx, `search ${status}: ${error.message}`);
+        if (!rotated) {
+          // rotateToken only fails to rotate when the search was stopped while waiting.
+          return [];
         }
-        throw error;
+        // Loop again with the new token. rotateToken already applied a delay/cooldown.
       }
     }
   }
 
   /**
-   * Fetch a profile, rotating once on an auth/rate-limit error. Non-fatal: returns null
-   * if the profile can't be fetched (matches the previous best-effort behavior).
+   * Fetch a profile, rotating tokens and retrying on auth/rate-limit errors (again and again)
+   * until it succeeds, the search is stopped, or a non-token error (e.g. 404) occurs.
+   * Non-fatal: returns null when the profile genuinely can't be fetched.
    */
   async getProfileWithRotation(ctx, username) {
-    try {
-      return await ctx.client.getUserProfile(username);
-    } catch (error) {
-      if (this.isGitHubTokenError(error)) {
-        const rotated = await this.rotateToken(ctx, `profile ${error.response?.status}: ${error.message}`);
-        if (rotated) {
-          try {
-            return await ctx.client.getUserProfile(username);
-          } catch (retryError) {
-            logger.warn(`[IterativeSearch] Profile fetch failed after rotation for ${username}: ${retryError.message}`);
+    while (true) {
+      // Stop only if the user paused/deleted the search.
+      const live = await IterativeSearch.findById(ctx.search._id).select('status');
+      if (!live || live.status !== 'in_progress') {
+        return null;
+      }
+
+      try {
+        return await ctx.client.getUserProfile(username);
+      } catch (error) {
+        if (this.isGitHubTokenError(error)) {
+          const status = error.response?.status;
+          logger.warn(
+            `[IterativeSearch] ${ctx.searchId} profile ${status} for ${username} — switching token and retrying`
+          );
+          const rotated = await this.rotateToken(ctx, `profile ${status}: ${error.message}`);
+          if (!rotated) {
             return null;
           }
+          continue; // retry with the new token
         }
+        // Non-token error (e.g. 404 user not found) — give up on just this profile.
+        logger.warn(`[IterativeSearch] Could not fetch profile for ${username}: ${error.message}`);
+        return null;
       }
-      logger.warn(`[IterativeSearch] Could not fetch profile for ${username}: ${error.message}`);
-      return null;
     }
   }
 
