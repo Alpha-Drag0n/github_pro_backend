@@ -15,6 +15,29 @@ const requestLogService = require('../services/requestLogService');
 const logger = new Logger();
 
 /**
+ * Normalize an IterativeSearch document for API responses.
+ *
+ * The model stores dates nested under `dateRange`, but the frontend reads flat
+ * `fromDate` / `toDate` fields. This flattens them to `YYYY-MM-DD` strings while
+ * preserving every other field (and the original `dateRange`) so existing and
+ * future consumers both work.
+ */
+function serializeSearch(search) {
+  const obj = typeof search.toObject === 'function' ? search.toObject() : { ...search };
+
+  const from = obj.dateRange && obj.dateRange.fromDate;
+  const to = obj.dateRange && obj.dateRange.toDate;
+  const toIsoDate = (value) =>
+    value ? new Date(value).toISOString().split('T')[0] : null;
+
+  return {
+    ...obj,
+    fromDate: toIsoDate(from),
+    toDate: toIsoDate(to),
+  };
+}
+
+/**
  * Get all iterative searches
  * GET /api/iterative-searches
  */
@@ -32,7 +55,7 @@ router.get('/iterative-searches', async (req, res) => {
       null
     );
 
-    res.json(searches);
+    res.json(searches.map(serializeSearch));
   } catch (error) {
     logger.error(`Error fetching iterative searches: ${error.message}`);
     res.status(500).json({ error: 'Failed to fetch searches' });
@@ -96,15 +119,7 @@ router.post('/iterative-searches', async (req, res) => {
 
     logger.info(`Iterative search created: ${searchId} (${totalDays} days)`);
 
-    res.status(201).json({
-      _id: search._id,
-      searchId: search.searchId,
-      status: search.status,
-      dateRange: search.dateRange,
-      totalDays: search.totalDays,
-      daysProcessed: 0,
-      createdAt: search.createdAt,
-    });
+    res.status(201).json(serializeSearch(search));
   } catch (error) {
     logger.error(`Error creating iterative search: ${error.message}`);
     res.status(500).json({ error: 'Failed to create search' });
@@ -154,7 +169,7 @@ router.get('/iterative-searches/:id/users', async (req, res) => {
     );
 
     res.json({
-      search: search.toObject(),
+      search: serializeSearch(search),
       users,
       pagination: {
         total,
@@ -186,7 +201,7 @@ router.get('/iterative-searches/:id', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    res.json(search);
+    res.json(serializeSearch(search));
   } catch (error) {
     logger.error(`Error fetching iterative search: ${error.message}`);
     res.status(500).json({ error: 'Failed to fetch search' });
