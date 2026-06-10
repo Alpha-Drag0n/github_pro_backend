@@ -134,7 +134,7 @@ class ContactPatternExtractor {
 
     // Pattern 1: Explicit whatsapp/wa prefix with various separators
     // whatsapp: +1 234 567 8900, wa: +1-234-567-8900, whatsapp +1 (234) 567-8900
-    const pattern1 = /(?:whatsapp|wa|msg|message|contact)[:\s]+[\s]?([\+]?\d[\d\s.-()]*\d)/gi;
+    const pattern1 = /(?:whatsapp|wa|msg|message|contact)[:\s]+[\s]?([\+]?\d[\d\s.\-()]*\d)/gi;
     let match;
     while ((match = pattern1.exec(text)) !== null) {
       const phone = this.normalizePhone(match[1]);
