@@ -20,7 +20,23 @@ const userSchema = new mongoose.Schema({
   bio: String,
   company: String,
   blog: String,
-  location: String, // From GitHub profile bio
+  location: String, // From GitHub profile (verbatim) — kept for backward compatibility
+  // Structured location: the profile location AND locations self-reported in repo
+  // READMEs/descriptions, each with the exact source URL, how it was found, and confidence.
+  locationInfo: {
+    profile: String, // profile.location
+    discovered: [
+      {
+        value: String, // e.g. "Berlin, Germany"
+        city: String,
+        country: String,
+        sources: [String], // source labels: "<repoUrl>#readme", "<repoUrl> (description)", "<profileUrl> (bio|blog|company)"
+        method: { type: String }, // 'marker' | 'flag' | 'ner'
+        confidence: { type: String }, // 'high' | 'medium' | 'low'
+      },
+    ],
+    best: String, // resolved single value (profile if present, else best discovered)
+  },
   followers: Number,
   following: Number,
   public_repos: Number,
@@ -186,7 +202,7 @@ userSchema.index({ username: 1, searchId: 1 }, { unique: true });
 userSchema.index({ 'foundIn.location': 1, 'foundIn.year': 1 });
 userSchema.index({ 'repositoryMining.lastMiningDate': 1 });
 userSchema.index({ 'contactInfo.emails.email': 1 });
-userSchema.index({ 'contactInfo.phones.number': 1 });
+userSchema.index({ 'contactInfo.phone.number': 1 });
 userSchema.index({ 'socialProfiles.linkedin.handle': 1 });
 userSchema.index({ 'repositoryMining.locations.location': 1 });
 userSchema.index({ 'repositoryMining.miningInProgress': 1 });

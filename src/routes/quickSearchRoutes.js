@@ -607,6 +607,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
             // README & description, recording the exact source URL for each finding.
             let contactInfo;
             let socialProfiles;
+            let locationInfo;
             let repositoriesChecked = 0;
             try {
               const discovery = await contactDiscoveryService.discoverContacts(
@@ -632,6 +633,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               );
               contactInfo = discovery.contactInfo;
               socialProfiles = discovery.socialProfiles;
+              locationInfo = discovery.locationInfo;
               repositoriesChecked = discovery.repositoriesChecked;
             } catch (discoveryError) {
               logger.warn(`Contact discovery failed for ${user.login}: ${discoveryError.message}`);
@@ -656,6 +658,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               emailMetadata: extractedData.emailMetadata,
               contactInfo,
               socialProfiles,
+              locationInfo,
               repositoryMining: { repositoriesChecked, lastMiningDate: new Date() },
               github_created_at: userProfile.created_at,
               github_updated_at: userProfile.updated_at,
@@ -1430,7 +1433,13 @@ router.post('/users/filter', async (req, res) => {
     }
 
     if (location) {
-      filter.location = { $regex: location, $options: 'i' };
+      // Match the profile location OR any location discovered in the user's repos.
+      // Use $and so this doesn't clash with the keyword $or below.
+      const rx = { $regex: location, $options: 'i' };
+      filter.$and = filter.$and || [];
+      filter.$and.push({
+        $or: [{ location: rx }, { 'locationInfo.best': rx }, { 'locationInfo.discovered.value': rx }],
+      });
     }
 
     if (company) {
@@ -1460,7 +1469,10 @@ router.post('/users/filter', async (req, res) => {
     }
 
     if (email) {
-      filter.emails = { $in: [email] };
+      // Search BOTH the legacy flat emails and the structured mined contacts.
+      const rx = { $regex: email, $options: 'i' };
+      filter.$and = filter.$and || [];
+      filter.$and.push({ $or: [{ emails: rx }, { 'contactInfo.emails.email': rx }] });
     }
 
     if (searchId) {

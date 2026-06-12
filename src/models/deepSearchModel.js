@@ -59,6 +59,26 @@ const iterativeSearchSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
+
+  // ===== Agent system: control + rolled-up progress =====
+  // The manager only ever writes a DESIRED state; agents converge to it. Agents no
+  // longer write this parent doc per bucket (that was a write hotspot, D6) — the
+  // manager's rollup loop recomputes `progress` from the tasks collection.
+  control: {
+    desired: { type: String, enum: ['run', 'paused', 'stopped'], default: 'run' },
+    requestedAt: Date,
+  },
+  priority: { type: Number, default: 0 }, // propagates to this job's tasks' priority
+  progress: {
+    totalBuckets: { type: Number, default: 0 },
+    done: { type: Number, default: 0 },
+    failed: { type: Number, default: 0 },
+    dead: { type: Number, default: 0 },
+    pending: { type: Number, default: 0 },
+    leased: { type: Number, default: 0 },
+    usersFound: { type: Number, default: 0 },
+    rollupAt: Date,
+  },
   // Location tracking
   excludedLocations: [String],
   lastFoundLocations: [String],

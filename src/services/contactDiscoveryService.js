@@ -9,6 +9,7 @@
  */
 
 const ContactPatternExtractor = require('./contactPatternExtractor');
+const locationExtractor = require('./locationExtractor');
 const Logger = require('../utils/logger');
 
 const logger = new Logger();
@@ -27,7 +28,7 @@ const INCLUDE_FORKS = process.env.CONTACT_INCLUDE_FORKS === 'true';
  * @param {function} [opts.rotate] - async (reason) => newClient|null. Called on a 401/403/429
  *        during the scan; should rotate the token and return a fresh GitHubClient (or null to
  *        give up). When omitted, token errors just skip that call (best-effort).
- * @returns {Promise<{ contactInfo, socialProfiles, summary, repositoriesChecked, repositoriesScanned, repoLog }>}
+ * @returns {Promise<{ contactInfo, socialProfiles, locationInfo, summary, repositoriesChecked, repositoriesScanned, repoLog }>}
  */
 async function discoverContacts(client, username, opts = {}) {
   const { profile = null, tag = '', rotate = null } = opts;
@@ -125,15 +126,20 @@ async function discoverContacts(client, username, opts = {}) {
   // ---- Consolidate across all sources (sources[] on each item hold the exact URLs) ----
   const { contactInfo, socialProfiles, summary } = ContactPatternExtractor.buildUserContactData(sources);
 
+  // Location from the SAME already-fetched text (no extra API calls): profile location +
+  // anything self-reported in repo READMEs/descriptions, with source URLs + confidence.
+  const locationInfo = locationExtractor.buildLocationInfo(sources, profile?.location);
+
   logger.info(
     `${prefix} ${username} TOTAL → emails=${summary.emails} phone=${summary.phone} ` +
       `discord=${summary.discord} telegram=${summary.telegram} whatsapp=${summary.whatsapp} ` +
-      `social=${summary.social} (from ${candidates.length} repos + profile)`
+      `social=${summary.social} locations=${locationInfo.discovered.length} (from ${candidates.length} repos + profile)`
   );
 
   return {
     contactInfo,
     socialProfiles,
+    locationInfo,
     summary,
     repositoriesChecked: repos.length,
     repositoriesScanned: candidates.length,

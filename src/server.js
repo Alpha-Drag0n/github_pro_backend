@@ -21,7 +21,10 @@ const deepSearchRoutes = require('./routes/deepSearchRoutes');
 const miningRoutes = require('./routes/miningRoutes');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const agentRoutes = require('./routes/agentRoutes');
 const healthRoutes = require('./routes/healthRoutes');
+const { startManager } = require('./services/agent/managerService');
+const { startAgent } = require('./services/agent/agentRunner');
 const { authenticate } = require('./middleware/authMiddleware');
 const socketAuthMiddleware = require('./middleware/socketAuthMiddleware');
 const setupSocketHandlers = require('./routes/socketRoutes');
@@ -78,6 +81,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api', authenticate, tokenRoutes);
 app.use('/api', authenticate, quickSearchRoutes);
 app.use('/api', authenticate, deepSearchRoutes);
+app.use('/api', authenticate, agentRoutes);
 app.use('/api/mining', authenticate, miningRoutes);
 
 // API error handler for unmatched API routes
@@ -170,6 +174,19 @@ async function startServer() {
       await recoverSearchesOnStartup(io, (search, selectedToken) => {
         quickSearchRoutes.executeSearchInBackground(search, selectedToken, io);
       });
+
+      // Agent system: manager control loops (reaper + rollup) always run here.
+      startManager(io);
+
+      // Phase 0: run search agents IN-PROCESS (no separate deploy). Set
+      // RUN_INPROCESS_AGENTS=false once you run agents as separate processes (npm run agent).
+      if (process.env.RUN_INPROCESS_AGENTS !== 'false') {
+        const n = Math.max(1, parseInt(process.env.INPROCESS_AGENT_COUNT || '1', 10));
+        for (let i = 0; i < n; i++) {
+          startAgent().catch((e) => logger.error(`Failed to start in-process agent: ${e.message}`));
+        }
+        logger.info(`Started ${n} in-process search agent(s)`);
+      }
 
       logger.info(`================================`);
       logger.info(`Server running on port ${PORT}`);

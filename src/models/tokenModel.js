@@ -83,6 +83,30 @@ const tokenSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+
+  // ===== Agent system: shared rate budget (self-imposed central limiter) =====
+  // GitHub has TWO separate rate buckets that deep search hits: the SEARCH API
+  // (~30/min) and the CORE API (5000/hr) used for profile/repos/readme. Agents
+  // sharing this token atomically "spend" from these before each call so the whole
+  // fleet can never exceed the real limit. `remaining` resets to `limit` once
+  // `resetAt` passes; values are also reconciled from GitHub's x-ratelimit headers.
+  budget: {
+    search: {
+      remaining: { type: Number, default: 28 }, // conservative (< real 30)
+      limit: { type: Number, default: 28 },
+      resetAt: { type: Date, default: null },
+    },
+    core: {
+      remaining: { type: Number, default: 4500 }, // conservative (< real 5000)
+      limit: { type: Number, default: 4500 },
+      resetAt: { type: Date, default: null },
+    },
+  },
+  // Token health: cool a token down after auth/abuse errors; quarantine if revoked.
+  consecutiveErrors: { type: Number, default: 0 },
+  cooldownUntil: { type: Date, default: null },
+  disabled: { type: Boolean, default: false }, // 401/revoked → removed from rotation
+
   createdAt: {
     type: Date,
     default: new Date(),

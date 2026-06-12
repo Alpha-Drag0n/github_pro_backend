@@ -14,6 +14,8 @@ const Logger = require('../utils/logger');
 const requestLogService = require('../services/requestLogService');
 const SearchTokenPool = require('../services/searchTokenPool');
 const iterativeSearchService = require('../services/deepSearchService');
+const Task = require('../models/taskModel');
+const taskQueue = require('../services/agent/taskQueue');
 
 const logger = new Logger();
 
@@ -107,9 +109,69 @@ router.get('/deep-searches', async (req, res) => {
   }
 });
 
+// Array-field "non-empty" existence checks, keyed by the presence-filter param name.
+const PRESENCE_FIELDS = {
+  email: { $or: [{ 'contactInfo.emails.0': { $exists: true } }, { 'emails.0': { $exists: true } }] },
+  linkedin: { 'socialProfiles.linkedin.0': { $exists: true } },
+  x: { 'socialProfiles.x.0': { $exists: true } },
+  discord: { 'contactInfo.discord.0': { $exists: true } },
+  telegram: { 'contactInfo.telegram.0': { $exists: true } },
+  whatsapp: { 'contactInfo.whatsapp.0': { $exists: true } },
+  phone: { 'contactInfo.phone.0': { $exists: true } },
+};
+const HAS_PROFILE_LOCATION = { location: { $nin: [null, ''] } };
+const HAS_DISCOVERED_LOCATION = { 'locationInfo.discovered.0': { $exists: true } };
+
+/** Build the Mongo filter for the deep-search users query from request params. */
+function buildDeepUserFilter(q) {
+  const and = [{ 'searchIterationHistory.0': { $exists: true } }]; // deep-search users only
+
+  if (q.username) and.push({ username: { $regex: q.username, $options: 'i' } });
+
+  if (q.location) {
+    const rx = { $regex: q.location, $options: 'i' };
+    and.push({ $or: [{ location: rx }, { 'locationInfo.best': rx }, { 'locationInfo.discovered.value': rx }] });
+  }
+  if (q.email) {
+    const rx = { $regex: q.email, $options: 'i' };
+    and.push({ $or: [{ 'contactInfo.emails.email': rx }, { emails: rx }] });
+  }
+  if (q.minFollowers) and.push({ followers: { $gte: parseInt(q.minFollowers, 10) } });
+  if (q.maxFollowers) and.push({ followers: { $lte: parseInt(q.maxFollowers, 10) } });
+
+  // Location presence: any | has (profile or repo) | profile | discovered | none
+  switch (q.locationPresence) {
+    case 'has':
+      and.push({ $or: [HAS_PROFILE_LOCATION, HAS_DISCOVERED_LOCATION, { 'locationInfo.best': { $nin: [null, ''] } }] });
+      break;
+    case 'profile':
+      and.push(HAS_PROFILE_LOCATION);
+      break;
+    case 'discovered':
+      and.push(HAS_DISCOVERED_LOCATION);
+      break;
+    case 'none':
+      and.push({ $nor: [HAS_PROFILE_LOCATION, HAS_DISCOVERED_LOCATION] });
+      break;
+    default:
+      break;
+  }
+
+  // Per-field presence toggles: <field>Has = 'yes' | 'no'
+  for (const [field, cond] of Object.entries(PRESENCE_FIELDS)) {
+    const v = q[`${field}Has`];
+    if (v === 'yes') and.push(cond);
+    else if (v === 'no') and.push({ $nor: [cond] });
+  }
+
+  return { $and: and };
+}
+
 /**
- * Unified Deep Search results — users found across ALL deep searches, with filters.
- * GET /api/deep-searches/users?page&limit&username&location&email&minFollowers
+ * Unified Deep Search results — users found across ALL deep searches, with detailed filters.
+ * GET /api/deep-searches/users?page&limit&username&location&email&minFollowers&maxFollowers
+ *   &locationPresence=has|profile|discovered|none
+ *   &emailHas|linkedinHas|xHas|discordHas|telegramHas|whatsappHas|phoneHas = yes|no
  * NOTE: must be declared before '/deep-searches/:id' so "users" isn't read as an id.
  */
 router.get('/deep-searches/users', async (req, res) => {
@@ -118,21 +180,7 @@ router.get('/deep-searches/users', async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    // Deep Search is the only flow that populates searchIterationHistory.
-    const filter = { 'searchIterationHistory.0': { $exists: true } };
-
-    if (req.query.username) {
-      filter.username = { $regex: req.query.username, $options: 'i' };
-    }
-    if (req.query.location) {
-      filter.location = { $regex: req.query.location, $options: 'i' };
-    }
-    if (req.query.email) {
-      filter['contactInfo.emails.email'] = { $regex: req.query.email, $options: 'i' };
-    }
-    if (req.query.minFollowers) {
-      filter.followers = { $gte: parseInt(req.query.minFollowers) };
-    }
+    const filter = buildDeepUserFilter(req.query);
 
     const total = await User.countDocuments(filter);
     const users = await User.find(filter)
@@ -337,41 +385,24 @@ router.post('/deep-searches/:id/start', async (req, res) => {
       return res.status(400).json({ error: 'Search is already completed' });
     }
 
-    // Assign a token and kick off the background runner BEFORE flipping status,
-    // so we don't mark it running when there is no token to run with.
+    // Agent system: generate per-bucket tasks; the manager's agents drain the queue.
+    // (No token check here — agents wait on the shared rate limiter when tokens are busy.)
     search.status = 'in_progress';
     search.startedAt = new Date();
     search.pausedAt = null;
     search.error = null;
+    search.control = { desired: 'run', requestedAt: new Date() };
     await search.save();
 
-    const launch = await launchIterativeSearch(search, req.io);
-    if (!launch.ok) {
-      search.status = 'failed';
-      search.error =
-        launch.reason === 'no_token'
-          ? 'No GitHub tokens available — add a token and try again'
-          : 'Search is already running';
-      await search.save();
-      return res.status(launch.reason === 'no_token' ? 400 : 409).json({ error: search.error });
-    }
+    const totalBuckets = await taskQueue.generateTasksForSearch(search);
 
-    requestLogService.logDBOperation(
-      'DeepSearch.updateOne',
-      { searchId: search.searchId, newStatus: 'in_progress' },
-      'update',
-      0,
-      true,
-      null
-    );
-
-    logger.info(`Iterative search started: ${search.searchId} with token ${launch.tokenName}`);
+    logger.info(`Deep search started: ${search.searchId} — ${totalBuckets} bucket tasks queued`);
 
     res.json({
       searchId: search.searchId,
       status: search.status,
-      tokenName: launch.tokenName,
-      message: 'Search started',
+      totalBuckets,
+      message: 'Search started — tasks queued for agents',
     });
   } catch (error) {
     logger.error(`Error starting iterative search: ${error.message}`);
@@ -396,24 +427,15 @@ router.post('/deep-searches/:id/pause', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    search.status = 'paused';
-    search.pausedAt = new Date();
-    await search.save();
+    // Pause = hold pending tasks + set desired state. In-flight tasks finish.
+    const held = await taskQueue.pauseSearch(search._id);
+    await DeepSearch.updateOne({ _id: search._id }, { $set: { pausedAt: new Date() } });
 
-    requestLogService.logDBOperation(
-      'DeepSearch.updateOne',
-      { searchId: search.searchId, newStatus: 'paused' },
-      'update',
-      0,
-      true,
-      null
-    );
-
-    logger.info(`Iterative search paused: ${search.searchId}`);
+    logger.info(`Deep search paused: ${search.searchId} (${held} tasks held)`);
 
     res.json({
       searchId: search.searchId,
-      status: search.status,
+      status: 'paused',
       message: 'Search paused',
     });
   } catch (error) {
@@ -450,39 +472,28 @@ router.post('/deep-searches/:id/resume', async (req, res) => {
       });
     }
 
-    const previousStatus = search.status;
-    search.status = 'in_progress';
-    search.resumedAt = new Date();
-    search.error = null;
-    await search.save();
-
-    const launch = await launchIterativeSearch(search, req.io);
-    if (!launch.ok) {
-      search.status = previousStatus;
-      search.error =
-        launch.reason === 'no_token'
-          ? 'No GitHub tokens available — add a token and try again'
-          : 'Search is already running';
+    // If the search never had tasks generated (e.g. created but never started),
+    // generate them now; otherwise release any held tasks back to the queue.
+    const existingTasks = await Task.countDocuments({ searchId: search._id });
+    if (existingTasks === 0) {
+      search.status = 'in_progress';
+      search.startedAt = search.startedAt || new Date();
+      search.resumedAt = new Date();
+      search.error = null;
+      search.control = { desired: 'run', requestedAt: new Date() };
       await search.save();
-      return res.status(launch.reason === 'no_token' ? 400 : 409).json({ error: search.error });
+      await taskQueue.generateTasksForSearch(search);
+    } else {
+      await taskQueue.resumeSearch(search._id);
+      await DeepSearch.updateOne({ _id: search._id }, { $set: { resumedAt: new Date(), error: null } });
     }
 
-    requestLogService.logDBOperation(
-      'DeepSearch.updateOne',
-      { searchId: search.searchId, newStatus: 'in_progress' },
-      'update',
-      0,
-      true,
-      null
-    );
-
-    logger.info(`Iterative search resumed: ${search.searchId} with token ${launch.tokenName}`);
+    logger.info(`Deep search resumed: ${search.searchId}`);
 
     res.json({
       searchId: search.searchId,
-      status: search.status,
-      tokenName: launch.tokenName,
-      message: 'Search resumed',
+      status: 'in_progress',
+      message: 'Search resumed — tasks queued for agents',
     });
   } catch (error) {
     logger.error(`Error resuming iterative search: ${error.message}`);
@@ -507,13 +518,18 @@ router.delete('/deep-searches/:id', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
+    // Cancel queued tasks first so agents stop picking them up, then delete.
+    await taskQueue.stopSearch(search._id);
+    const deletedTasks = await Task.deleteMany({ searchId: search._id });
+
     // Delete associated logs
-    const deletedLogs = await DeepSearchLog.deleteMany({ 
-      searchId: search._id 
+    const deletedLogs = await DeepSearchLog.deleteMany({
+      searchId: search._id
     });
 
     // Delete search
     await DeepSearch.deleteOne({ _id: search._id });
+    logger.info(`Deleted ${deletedTasks.deletedCount} tasks for ${search.searchId}`);
 
     requestLogService.logDBOperation(
       'DeepSearch.deleteOne',
