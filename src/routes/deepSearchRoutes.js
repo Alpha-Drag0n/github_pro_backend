@@ -128,9 +128,12 @@ function buildDeepUserFilter(q) {
 
   if (q.username) and.push({ username: { $regex: q.username, $options: 'i' } });
 
-  if (q.location) {
-    const rx = { $regex: q.location, $options: 'i' };
-    and.push({ $or: [{ location: rx }, { 'locationInfo.best': rx }, { 'locationInfo.discovered.value': rx }] });
+  // Location (profile field only).
+  if (q.location) and.push({ location: { $regex: q.location, $options: 'i' } });
+  // Location info (repo-discovered): best + discovered place values.
+  if (q.locationInfo) {
+    const rx = { $regex: q.locationInfo, $options: 'i' };
+    and.push({ $or: [{ 'locationInfo.best': rx }, { 'locationInfo.discovered.value': rx }] });
   }
   if (q.email) {
     const rx = { $regex: q.email, $options: 'i' };
@@ -139,23 +142,13 @@ function buildDeepUserFilter(q) {
   if (q.minFollowers) and.push({ followers: { $gte: parseInt(q.minFollowers, 10) } });
   if (q.maxFollowers) and.push({ followers: { $lte: parseInt(q.maxFollowers, 10) } });
 
-  // Location presence: any | has (profile or repo) | profile | discovered | none
-  switch (q.locationPresence) {
-    case 'has':
-      and.push({ $or: [HAS_PROFILE_LOCATION, HAS_DISCOVERED_LOCATION, { 'locationInfo.best': { $nin: [null, ''] } }] });
-      break;
-    case 'profile':
-      and.push(HAS_PROFILE_LOCATION);
-      break;
-    case 'discovered':
-      and.push(HAS_DISCOVERED_LOCATION);
-      break;
-    case 'none':
-      and.push({ $nor: [HAS_PROFILE_LOCATION, HAS_DISCOVERED_LOCATION] });
-      break;
-    default:
-      break;
-  }
+  // Location (profile) presence: yes | no
+  if (q.locationHas === 'yes') and.push(HAS_PROFILE_LOCATION);
+  else if (q.locationHas === 'no') and.push({ $nor: [HAS_PROFILE_LOCATION] });
+
+  // Location info (repo-discovered) presence: yes | no
+  if (q.locationInfoHas === 'yes') and.push(HAS_DISCOVERED_LOCATION);
+  else if (q.locationInfoHas === 'no') and.push({ $nor: [HAS_DISCOVERED_LOCATION] });
 
   // Per-field presence toggles: <field>Has = 'yes' | 'no'
   for (const [field, cond] of Object.entries(PRESENCE_FIELDS)) {
@@ -169,8 +162,8 @@ function buildDeepUserFilter(q) {
 
 /**
  * Unified Deep Search results — users found across ALL deep searches, with detailed filters.
- * GET /api/deep-searches/users?page&limit&username&location&email&minFollowers&maxFollowers
- *   &locationPresence=has|profile|discovered|none
+ * GET /api/deep-searches/users?page&limit&username&location&locationInfo&email&minFollowers&maxFollowers
+ *   &locationHas|locationInfoHas = yes|no
  *   &emailHas|linkedinHas|xHas|discordHas|telegramHas|whatsappHas|phoneHas = yes|no
  * NOTE: must be declared before '/deep-searches/:id' so "users" isn't read as an id.
  */

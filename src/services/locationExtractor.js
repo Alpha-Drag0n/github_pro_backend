@@ -39,13 +39,17 @@ function clean(s) {
     .trim();
 }
 
-const NLP_CAP = 20000; // bound the text fed to NLP/codepoint scans (pathological READMEs)
+// Chars of each text block fed to NLP / codepoint scans. 0 = NO cap — the FULL README is
+// passed through NLP (the default). On tiny hosts where a huge README's NLP pass blocks the
+// event loop / delays heartbeats, set LOCATION_NLP_MAX_CHARS to bound it.
+const NLP_CAP = parseInt(process.env.LOCATION_NLP_MAX_CHARS || '0', 10);
+const capForNlp = (text) => (NLP_CAP > 0 && text.length > NLP_CAP ? text.slice(0, NLP_CAP) : text);
 
 /** Decode any flag emojis in a string into country names. Bounded (no full-string spread). */
 function flagsToCountries(text) {
   const out = [];
   if (!regionNames) return out;
-  const len = Math.min(text.length, NLP_CAP);
+  const len = NLP_CAP > 0 ? Math.min(text.length, NLP_CAP) : text.length;
   for (let i = 0; i + 1 < len; i += 1) {
     const a = text.codePointAt(i);
     if (a >= 0x1f1e6 && a <= 0x1f1ff) {
@@ -124,10 +128,11 @@ function extractLocations(text) {
     add({ value: country, city: null, country, method: 'flag', confidence: 'high' });
   }
 
-  // Tier 3: NER over the (capped) text. Iterate whole place spans (keeps multi-word cities
-  // like "San Francisco" intact instead of splitting into tokens), keep only recognized
-  // places, and classify: a pure country is medium, a city (or city,country) is low/noise.
-  const doc = nlp(text.length > NLP_CAP ? text.slice(0, NLP_CAP) : text);
+  // Tier 3: NER over the FULL text (the entire README), unless LOCATION_NLP_MAX_CHARS caps it.
+  // Iterate whole place spans (keeps multi-word cities like "San Francisco" intact instead of
+  // splitting into tokens), keep only recognized places, and classify: a pure country is
+  // medium, a city (or city,country) is low/noise.
+  const doc = nlp(capForNlp(text));
   for (const raw of doc.places().out('array')) {
     const value = clean(raw);
     if (!value) continue;
