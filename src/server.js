@@ -9,16 +9,22 @@ const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const socketIo = require('socket.io');
 const Database = require('./utils/database');
 const Logger = require('./utils/logger');
 const { initializeTokensFromDatabase } = require('./utils/tokenInitializer');
 const tokenRoutes = require('./routes/tokenRoutes');
-const searchRoutes = require('./routes/searchRoutes');
+const quickSearchRoutes = require('./routes/quickSearchRoutes');
+const deepSearchRoutes = require('./routes/deepSearchRoutes');
+const miningRoutes = require('./routes/miningRoutes');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const agentRoutes = require('./routes/agentRoutes');
 const healthRoutes = require('./routes/healthRoutes');
+const { startManager } = require('./services/agent/managerService');
+const { startAgent } = require('./services/agent/agentRunner');
 const { authenticate } = require('./middleware/authMiddleware');
 const socketAuthMiddleware = require('./middleware/socketAuthMiddleware');
 const setupSocketHandlers = require('./routes/socketRoutes');
@@ -52,9 +58,15 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
-// Serve frontend build in production
+// Serve frontend build in production (optional - only if built)
 const frontendBuildPath = path.join(__dirname, '../../frontend/dist');
-app.use(express.static(frontendBuildPath));
+const frontendExists = fs.existsSync(frontendBuildPath);
+
+if (frontendExists) {
+  app.use(express.static(frontendBuildPath));
+} else {
+  logger.warn('Frontend build not found at ' + frontendBuildPath + ' - frontend routes will not be served');
+}
 
 // Public health check (no auth)
 app.use('/health', healthRoutes);
@@ -67,14 +79,36 @@ app.use('/api/admin', adminRoutes);
 
 // Protected API routes
 app.use('/api', authenticate, tokenRoutes);
-app.use('/api', authenticate, searchRoutes);
+app.use('/api', authenticate, quickSearchRoutes);
+app.use('/api', authenticate, deepSearchRoutes);
+app.use('/api', authenticate, agentRoutes);
+app.use('/api/mining', authenticate, miningRoutes);
+
+// API error handler for unmatched API routes
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: 'API endpoint not found',
+    path: req.path,
+    method: req.method,
+    message: 'The requested API endpoint does not exist. Use /health for server status.',
+  });
+});
 
 // Serve frontend for all non-API routes (client-side routing)
+// Only applies when frontend is built; otherwise return 404
 app.get('*', (req, res) => {
+  // Try to serve frontend if it exists
+  if (!frontendExists) {
+    return res.status(404).json({
+      error: 'Not found',
+      message: 'Frontend build not found. API is available at /health or /api/*',
+    });
+  }
+
   const indexPath = path.join(frontendBuildPath, 'index.html');
   res.sendFile(indexPath, (err) => {
     if (err) {
-      res.status(404).json({ message: 'Frontend not built. Run: npm run build in frontend/' });
+      res.status(404).json({ error: 'Not found' });
     }
   });
 });
@@ -138,8 +172,21 @@ async function startServer() {
       });
 
       await recoverSearchesOnStartup(io, (search, selectedToken) => {
-        searchRoutes.executeSearchInBackground(search, selectedToken, io);
+        quickSearchRoutes.executeSearchInBackground(search, selectedToken, io);
       });
+
+      // Agent system: manager control loops (reaper + rollup) always run here.
+      startManager(io);
+
+      // Phase 0: run search agents IN-PROCESS (no separate deploy). Set
+      // RUN_INPROCESS_AGENTS=false once you run agents as separate processes (npm run agent).
+      if (process.env.RUN_INPROCESS_AGENTS !== 'false') {
+        const n = Math.max(1, parseInt(process.env.INPROCESS_AGENT_COUNT || '1', 10));
+        for (let i = 0; i < n; i++) {
+          startAgent().catch((e) => logger.error(`Failed to start in-process agent: ${e.message}`));
+        }
+        logger.info(`Started ${n} in-process search agent(s)`);
+      }
 
       logger.info(`================================`);
       logger.info(`Server running on port ${PORT}`);
