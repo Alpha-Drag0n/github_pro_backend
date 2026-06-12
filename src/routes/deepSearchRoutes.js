@@ -114,6 +114,10 @@ const PRESENCE_FIELDS = {
   email: { $or: [{ 'contactInfo.emails.0': { $exists: true } }, { 'emails.0': { $exists: true } }] },
   linkedin: { 'socialProfiles.linkedin.0': { $exists: true } },
   x: { 'socialProfiles.x.0': { $exists: true } },
+  facebook: { 'socialProfiles.facebook.0': { $exists: true } },
+  instagram: { 'socialProfiles.instagram.0': { $exists: true } },
+  youtube: { 'socialProfiles.youtube.0': { $exists: true } },
+  tiktok: { 'socialProfiles.tiktok.0': { $exists: true } },
   discord: { 'contactInfo.discord.0': { $exists: true } },
   telegram: { 'contactInfo.telegram.0': { $exists: true } },
   whatsapp: { 'contactInfo.whatsapp.0': { $exists: true } },
@@ -164,7 +168,7 @@ function buildDeepUserFilter(q) {
  * Unified Deep Search results — users found across ALL deep searches, with detailed filters.
  * GET /api/deep-searches/users?page&limit&username&location&locationInfo&email&minFollowers&maxFollowers
  *   &locationHas|locationInfoHas = yes|no
- *   &emailHas|linkedinHas|xHas|discordHas|telegramHas|whatsappHas|phoneHas = yes|no
+ *   &emailHas|linkedinHas|xHas|facebookHas|instagramHas|youtubeHas|tiktokHas|discordHas|telegramHas|whatsappHas|phoneHas = yes|no
  * NOTE: must be declared before '/deep-searches/:id' so "users" isn't read as an id.
  */
 router.get('/deep-searches/users', async (req, res) => {
