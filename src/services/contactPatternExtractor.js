@@ -10,7 +10,7 @@ class ContactPatternExtractor {
    * @param {string} text - Text to extract from
    * @returns {object} Extracted contact information with confidence scores
    */
-  static extractContactInfo(text) {
+  static extractContactInfo(text, trusted = false) {
     if (!text || typeof text !== 'string') {
       return this.getEmptyResult();
     }
@@ -24,7 +24,7 @@ class ContactPatternExtractor {
     };
 
     // Extract each contact type
-    result.emails = this.extractEmails(text);
+    result.emails = this.extractEmails(text, trusted);
     result.phones = this.extractPhones(text);
     result.discord = this.extractDiscord(text);
     result.telegram = this.extractTelegram(text);
@@ -64,7 +64,7 @@ class ContactPatternExtractor {
    * Extract emails
    * Pattern: standard email regex
    */
-  static extractEmails(text) {
+  static extractEmails(text, trusted = false) {
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     const found = new Set();
 
@@ -91,6 +91,10 @@ class ContactPatternExtractor {
       const invalidStructure = [/^\./, /\.$/, /\.\./, /^-/, /@-/, /@\./, /\.@/, /@.*@/];
       if (invalidStructure.some((p) => p.test(email))) return false;
       if (lower.endsWith('@users.noreply.github.com') || lower.endsWith('@noreply.github.com')) return false;
+      // Structured, user-confirmed emails (e.g. GitHub's public profile email) skip the
+      // free-text placeholder heuristics below: "info@/mail@/name@<real-domain>" are common
+      // real catch-all addresses, only "junk" when scraped from prose/boilerplate.
+      if (trusted) return true;
       if (/^(example|test|tests?|email|e?mail|name|user|username|your|youremail|someone|foo|bar|info|noreply|no-reply|donotreply)@/.test(lower)) return false;
       if (/@(example|test|domain|email|yourdomain|sentry\.io|wixpress\.com)\b/.test(lower)) return false;
       return true;
@@ -521,9 +525,10 @@ class ContactPatternExtractor {
       const text = entry && entry.text;
       const source = (entry && entry.source) || 'profile';
       if (!text || typeof text !== 'string') continue;
+      const trusted = !!(entry && entry.trusted); // structured/user-confirmed source
 
-      const contact = this.extractContactInfo(text);
-      contact.emails.forEach((v) => addValue(emails, 'email', v, source, { confidence: 'medium' }));
+      const contact = this.extractContactInfo(text, trusted);
+      contact.emails.forEach((v) => addValue(emails, 'email', v, source, { confidence: trusted ? 'high' : 'medium' }));
       contact.phones.forEach((v) => addValue(phone, 'number', v, source, { confidence: 'medium' }));
       contact.discord.forEach((v) => addValue(discord, 'handle', v, source));
       contact.telegram.forEach((v) => addValue(telegram, 'username', v, source));

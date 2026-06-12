@@ -20,6 +20,8 @@ const userSchema = new mongoose.Schema({
   bio: String,
   company: String,
   blog: String,
+  publicEmail: String, // GitHub profile's public email field (structured; distinct from mined emails)
+  twitter_username: String, // GitHub profile's dedicated X/Twitter handle (structured)
   location: String, // From GitHub profile (verbatim) — kept for backward compatibility
   // Structured location: the profile location AND locations self-reported in repo
   // READMEs/descriptions, each with the exact source URL, how it was found, and confidence.

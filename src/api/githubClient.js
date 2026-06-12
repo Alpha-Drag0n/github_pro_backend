@@ -183,6 +183,8 @@ class GitHubClient {
         blog: user.blog,
         location: user.location,
         bio: user.bio, // Full bio from profile
+        email: user.email, // Public profile email (structured field; often null)
+        twitter_username: user.twitter_username, // Dedicated X/Twitter handle (structured field)
         public_repos: user.public_repos,
         followers: user.followers,
         following: user.following,

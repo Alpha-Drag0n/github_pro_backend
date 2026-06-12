@@ -649,6 +649,8 @@ async function executeSearchInBackground(search, selectedToken, io) {
               bio: extractedData.bio,
               company: userProfile.company,
               blog: userProfile.blog,
+              publicEmail: userProfile.email,
+              twitter_username: userProfile.twitter_username,
               location: userProfile.location,
               followers: userProfile.followers,
               following: userProfile.following,

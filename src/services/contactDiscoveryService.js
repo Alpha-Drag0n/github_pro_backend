@@ -65,10 +65,20 @@ async function discoverContacts(client, username, opts = {}) {
   const sources = [];
 
   // ---- Profile-level text ----
+  // Free-text fields are scanned by the regex extractors; the two structured fields GitHub
+  // exposes directly (public email + X/Twitter handle) are fed in as labelled sources so they
+  // are captured even when the user never wrote them into a bio or README.
   if (profile) {
     if (profile.bio) sources.push({ text: profile.bio, source: `${profileUrl} (bio)` });
     if (profile.blog) sources.push({ text: profile.blog, source: `${profileUrl} (blog)` });
     if (profile.company) sources.push({ text: profile.company, source: `${profileUrl} (company)` });
+    if (profile.email) sources.push({ text: profile.email, source: `${profileUrl} (profile email)`, trusted: true });
+    if (profile.twitter_username) {
+      sources.push({
+        text: `https://x.com/${profile.twitter_username}`,
+        source: `${profileUrl} (twitter)`,
+      });
+    }
   }
 
   // ---- Repositories ----

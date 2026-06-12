@@ -302,6 +302,8 @@ class IterativeSearchService {
           bio: existingAnywhere.bio,
           company: existingAnywhere.company,
           blog: existingAnywhere.blog,
+          email: existingAnywhere.publicEmail,
+          twitter_username: existingAnywhere.twitter_username,
           location: existingAnywhere.location,
           followers: existingAnywhere.followers,
           following: existingAnywhere.following,
@@ -324,6 +326,7 @@ class IterativeSearchService {
       // repository each datum came from. Non-fatal — a user is still saved if it fails.
       let contactInfo;
       let socialProfiles;
+      let locationInfo;
       let repositoriesChecked = 0;
       try {
         const discovery = await contactDiscoveryService.discoverContacts(ctx.client, username, {
@@ -336,6 +339,7 @@ class IterativeSearchService {
         });
         contactInfo = discovery.contactInfo;
         socialProfiles = discovery.socialProfiles;
+        locationInfo = discovery.locationInfo;
         repositoriesChecked = discovery.repositoriesChecked;
       } catch (error) {
         logger.warn(`[DeepSearch] ${search.searchId} contact discovery failed for ${username}: ${error.message}`);
@@ -346,11 +350,14 @@ class IterativeSearchService {
           username,
           searchId: search.searchId,
           displayName: profile?.name || item.login,
+          name: profile?.name,
           githubUrl: item.html_url,
           avatar_url: profile?.avatar_url || item.avatar_url,
           bio: profile?.bio,
           company: profile?.company,
           blog: profile?.blog,
+          publicEmail: profile?.email,
+          twitter_username: profile?.twitter_username,
           location: profile?.location,
           followers: profile?.followers,
           following: profile?.following,
@@ -359,6 +366,7 @@ class IterativeSearchService {
           github_updated_at: profile?.updated_at,
           contactInfo,
           socialProfiles,
+          locationInfo,
           repositoryMining: { repositoriesChecked, lastMiningDate: new Date() },
           foundIn: {
             location: profile?.location || 'Unknown',
