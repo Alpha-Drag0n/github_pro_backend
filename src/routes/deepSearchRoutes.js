@@ -204,6 +204,62 @@ router.get('/deep-searches/users', async (req, res) => {
 });
 
 /**
+ * Save a RocketReach-derived location onto a deep-search user.
+ * PATCH /api/deep-searches/users/:id/rocketreach-location
+ * Body: { value, linkedinUrl, status }
+ *   - status 'found'      → value is the location string (required)
+ *   - status 'not_found'  → RocketReach had no result; value is cleared
+ * Used by the RocketReach Chrome extension to persist enrichment. Writes only the
+ * isolated `locationInfo.rocketreach` sub-document; never touches `location` or `discovered`.
+ */
+router.patch('/deep-searches/users/:id/rocketreach-location', async (req, res) => {
+  try {
+    const { value, linkedinUrl, status } = req.body || {};
+    const normalizedStatus = status === 'not_found' ? 'not_found' : 'found';
+
+    if (normalizedStatus === 'found' && !String(value || '').trim()) {
+      return res.status(400).json({ error: 'value is required when status is "found"' });
+    }
+
+    const rocketreach = {
+      value: normalizedStatus === 'found' ? String(value).trim() : '',
+      linkedinUrl: String(linkedinUrl || '').trim(),
+      status: normalizedStatus,
+      updatedAt: new Date(),
+    };
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { $set: { 'locationInfo.rocketreach': rocketreach } },
+      { new: true, runValidators: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    requestLogService.logDBOperation(
+      'User.findByIdAndUpdate',
+      { userId: String(user._id), status: normalizedStatus },
+      'update',
+      0,
+      true,
+      null
+    );
+
+    res.json({
+      message: 'RocketReach location saved',
+      userId: user._id,
+      username: user.username,
+      rocketreach: user.locationInfo?.rocketreach,
+    });
+  } catch (error) {
+    logger.error(`Error saving RocketReach location: ${error.message}`);
+    res.status(500).json({ error: 'Failed to save location' });
+  }
+});
+
+/**
  * Create new iterative search
  * POST /api/deep-searches
  * Body: { fromDate, toDate }
