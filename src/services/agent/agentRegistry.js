@@ -12,12 +12,14 @@ const events = require('./eventService');
 const { DEAD_AGENT_MS } = require('./agentConfig');
 
 /** Register (or re-register) an agent. Returns the agent doc. */
-async function register({ agentId, host, pid, version, capabilities }) {
+async function register({ agentId, host, pid, version, capabilities, instanceId }) {
   const now = new Date();
   const agent = await Agent.findOneAndUpdate(
     { agentId },
     {
-      $set: { host, pid, version, capabilities, status: 'idle', lastHeartbeat: now },
+      // instanceId is set on EVERY (re)register: a newer deploy claiming the same agentId
+      // overwrites it, which is how the older instance learns it has been superseded.
+      $set: { host, pid, version, capabilities, instanceId, status: 'idle', lastHeartbeat: now },
       // Initialize the control channel ONLY on first insert — a re-register (restart/
       // reconnect with a reused agentId) must not clobber a pending manager command.
       $setOnInsert: {
@@ -51,13 +53,15 @@ async function heartbeat(agentId, patch = {}) {
   if (Object.keys(inc).length) update.$inc = inc;
 
   const agent = await Agent.findOneAndUpdate({ agentId }, update, { new: true });
-  return agent ? agent.control : { command: 'run', assignTaskId: null };
+  return agent
+    ? { control: agent.control, instanceId: agent.instanceId }
+    : { control: { command: 'run', assignTaskId: null }, instanceId: null };
 }
 
-/** Read just the control channel (cheap) so the agent loop can react quickly. */
+/** Read the control channel + current instanceId (cheap) so the agent loop can react quickly. */
 async function readControl(agentId) {
-  const a = await Agent.findOne({ agentId }).select('control');
-  return a ? a.control : null;
+  const a = await Agent.findOne({ agentId }).select('control instanceId');
+  return a ? { control: a.control, instanceId: a.instanceId } : null;
 }
 
 /** Light status-only update (used by the loop to reflect paused/draining/idle/busy promptly). */

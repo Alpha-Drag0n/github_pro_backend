@@ -189,6 +189,11 @@ class TokenManager {
   async checkAllTokens() {
     const results = [];
 
+    // Load tokens straight from the DB. The route instantiates a fresh TokenManager and
+    // never calls initialize(), so this.tokens would be empty here — which is why the
+    // endpoint reported "checked 0 tokens". Querying directly makes the check stateless.
+    this.tokens = await Token.find({});
+
     for (const token of this.tokens) {
       try {
         const isValid = await this.verifyToken(token.token);
@@ -200,6 +205,7 @@ class TokenManager {
         } else {
           await this.updateRateLimit(token);
           token.errorCount = 0;
+          token.failureReason = undefined; // clear any stale failure note on a now-valid token
         }
 
         await token.save();

@@ -159,7 +159,10 @@ async function startServer() {
     logger.info('Initializing tokens from database...');
     const tokenResults = await initializeTokensFromDatabase();
 
-    registerGracefulShutdown({ server });
+    // Handles of in-process agents, so graceful shutdown can stop them (release in-flight
+    // tasks immediately) instead of leaving them for the 90s reaper.
+    const inProcessAgents = [];
+    registerGracefulShutdown({ server, getAgents: () => inProcessAgents });
 
     server.listen(PORT, async () => {
       startSelfKeepAlive();
@@ -183,7 +186,9 @@ async function startServer() {
       if (process.env.RUN_INPROCESS_AGENTS !== 'false') {
         const n = Math.max(1, parseInt(process.env.INPROCESS_AGENT_COUNT || '1', 10));
         for (let i = 0; i < n; i++) {
-          startAgent().catch((e) => logger.error(`Failed to start in-process agent: ${e.message}`));
+          startAgent({ ordinal: i })
+            .then((a) => inProcessAgents.push(a))
+            .catch((e) => logger.error(`Failed to start in-process agent: ${e.message}`));
         }
         logger.info(`Started ${n} in-process search agent(s)`);
       }

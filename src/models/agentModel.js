@@ -14,8 +14,13 @@ const mongoose = require('mongoose');
 
 const agentSchema = new mongoose.Schema(
   {
-    // Stable id for this process, e.g. `${host}:${pid}:${rand}`.
+    // Stable identity for a logical agent slot, reused across redeploys, e.g.
+    // `${RENDER_SERVICE_ID}-${ordinal}`. The agent record is upserted on this key.
     agentId: { type: String, required: true, unique: true },
+
+    // Unique per process boot (RENDER_INSTANCE_ID, else host:pid). A newer deploy registering
+    // with the SAME agentId overwrites this; the older instance sees the mismatch and self-drains.
+    instanceId: { type: String, default: null },
 
     host: String,
     pid: Number,

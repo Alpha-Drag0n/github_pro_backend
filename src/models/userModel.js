@@ -38,6 +38,15 @@ const userSchema = new mongoose.Schema({
       },
     ],
     best: String, // resolved single value (profile if present, else best discovered)
+    // RocketReach enrichment — location resolved from the user's LinkedIn URL via the
+    // RocketReach Chrome extension. Kept isolated from `discovered[]` so it never mixes
+    // with repo-mined data and can be displayed/exported on its own.
+    rocketreach: {
+      value: String, // location string from RocketReach, e.g. "San Francisco, California, US" ('' when not found)
+      linkedinUrl: String, // the LinkedIn URL that was looked up
+      status: { type: String }, // 'found' | 'not_found'
+      updatedAt: Date,
+    },
   },
   followers: Number,
   following: Number,
