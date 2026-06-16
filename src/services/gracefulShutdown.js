@@ -40,7 +40,7 @@ async function pauseActiveSearchesInDatabase() {
   }
 }
 
-async function runShutdown(server) {
+async function runShutdown(server, getAgents) {
   stopSelfKeepAlive();
   setShuttingDown(true);
 
@@ -59,6 +59,18 @@ async function runShutdown(server) {
   const stopped = stopAllWorkersImmediately();
   if (stopped > 0) {
     logger.info(`Stopped ${stopped} search worker(s) immediately`);
+  }
+
+  // Stop in-process agents: each releases its in-flight task back to 'pending' right away,
+  // so a redeploy hands work off immediately instead of waiting for the lease reaper (~90s).
+  try {
+    const agents = (typeof getAgents === 'function' && getAgents()) || [];
+    if (agents.length) {
+      await Promise.all(agents.map((a) => a.stop && a.stop().catch(() => {})));
+      logger.info(`Stopped ${agents.length} in-process agent(s)`);
+    }
+  } catch (e) {
+    logger.warn(`Agent shutdown error: ${e.message}`);
   }
 
   await pauseActiveSearchesInDatabase();
@@ -83,7 +95,7 @@ async function runShutdown(server) {
 /**
  * @param {{ server: import('http').Server }} options
  */
-function registerGracefulShutdown({ server }) {
+function registerGracefulShutdown({ server, getAgents }) {
   const handleSignal = (signal) => {
     if (shutdownPromise) {
       return shutdownPromise;
@@ -91,7 +103,7 @@ function registerGracefulShutdown({ server }) {
 
     logger.info(`Received ${signal} (active workers: ${getActiveWorkerCount()})`);
 
-    shutdownPromise = runShutdown(server)
+    shutdownPromise = runShutdown(server, getAgents)
       .then(() => {
         process.exit(0);
       })

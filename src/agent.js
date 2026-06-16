@@ -32,7 +32,8 @@ async function main() {
   const count = Math.max(1, parseInt(process.env.AGENT_COUNT || '1', 10));
   const agents = [];
   for (let i = 0; i < count; i++) {
-    agents.push(await startAgent());
+    // Stable per-slot id (`${RENDER_SERVICE_ID}-${i}`) so redeploys reuse the agent record.
+    agents.push(await startAgent({ ordinal: i }));
   }
   logger.info(`Started ${agents.length} agent(s) in this process`);
 

@@ -18,7 +18,7 @@ const User = require('../../../models/userModel');
 const GitHubClient = require('../../../api/githubClient');
 const contactDiscoveryService = require('../../contactDiscoveryService');
 const tokenRateLimiter = require('../tokenRateLimiter');
-const { TOKEN_ROTATION_CYCLES } = require('../agentConfig');
+const { rotationPlan } = require('../agentConfig');
 const Logger = require('../../../utils/logger');
 
 const logger = new Logger();
@@ -70,8 +70,9 @@ async function paginatedSearch(query, ctx) {
   const results = [];
   const perPage = 100;
   const maxPages = GITHUB_SEARCH_CAP / perPage;
+  const { maxRotations, perToken } = rotationPlan(ctx.tokenCount);
   let rotations = 0;
-  const maxRotations = TOKEN_ROTATION_CYCLES * Math.max(1, ctx.tokenCount || 1);
+  const failsByToken = new Map(); // token._id → consecutive failures (cool + rotate at perToken)
 
   for (let page = 1; page <= maxPages; page++) {
     let token = await acquireOrWait('search', ctx);
@@ -88,6 +89,7 @@ async function paginatedSearch(query, ctx) {
       await tokenRateLimiter.reconcile(token._id, 'search', res.headers);
       await tokenRateLimiter.reportSuccess(token._id);
       ctx.requests++;
+      failsByToken.delete(token._id); // recovered → reset its failure streak
 
       const items = res.data.items || [];
       results.push(...items);
@@ -99,15 +101,23 @@ async function paginatedSearch(query, ctx) {
         break;
       }
       const kind = classifyTokenError(status);
-      if (kind) {
+      if (!kind) throw Object.assign(error, { code: `HTTP_${status || 'NETWORK'}` });
+
+      rotations++;
+      if (rotations > maxRotations) {
+        throw Object.assign(new Error(`search failed after ${rotations - 1} rotations`), { code: 'RATE_LIMIT' });
+      }
+      // Give a token `perToken` attempts before cooling it (the 1st failure may be transient);
+      // only then report the error so the limiter rotates it out.
+      const fails = (failsByToken.get(token._id) || 0) + 1;
+      failsByToken.set(token._id, fails);
+      if (fails >= perToken) {
         const retryAfter = parseInt(error.response?.headers?.['retry-after'], 10);
         await tokenRateLimiter.reportError(token._id, kind, retryAfter ? retryAfter * 1000 : 0);
-        rotations++;
-        if (rotations > maxRotations) throw Object.assign(new Error(`search failed after ${rotations} rotations`), { code: 'RATE_LIMIT' });
-        page--; // retry same page with another token
-        continue;
+        failsByToken.delete(token._id);
       }
-      throw Object.assign(error, { code: `HTTP_${status || 'NETWORK'}` });
+      page--; // retry the same page (same token if still warm, else the next one)
+      continue;
     }
   }
   return { results, aborted: false };
@@ -168,8 +178,9 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
     } else {
       core = await makeCoreClient(ctx);
       if (!core) break; // capacity/abort while waiting for a token
+      const { maxRotations, perToken } = rotationPlan(ctx.tokenCount);
       let rotations = 0;
-      const maxRot = TOKEN_ROTATION_CYCLES * Math.max(1, ctx.tokenCount || 1);
+      const failsByToken = new Map(); // token._id → consecutive failures (cool + rotate at perToken)
       let skip = false;
       for (;;) {
         try {
@@ -184,19 +195,30 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
             break;
           }
           const kind = classifyTokenError(status);
-          if (kind && rotations < maxRot) {
+          if (!kind) {
+            // Persistent non-token error (5xx/network) → skip rather than persist a hollow record.
+            logger.warn(`[bucket] profile fetch failed for ${username}: ${e.message}`);
+            skip = true;
+            break;
+          }
+          rotations += 1;
+          if (rotations > maxRotations) {
+            logger.warn(`[bucket] profile fetch for ${username} gave up after ${rotations - 1} retries`);
+            skip = true;
+            break;
+          }
+          // Give a token `perToken` attempts before cooling it (the 1st failure may be
+          // transient); only then report the error so the limiter rotates it out.
+          const fails = (failsByToken.get(core.tokenId) || 0) + 1;
+          failsByToken.set(core.tokenId, fails);
+          if (fails >= perToken) {
             const ra = parseInt(e.response?.headers?.['retry-after'], 10);
             await tokenRateLimiter.reportError(core.tokenId, kind, ra ? ra * 1000 : 0);
-            rotations += 1;
-            core = await makeCoreClient(ctx);
-            if (!core) { skip = true; break; } // capacity/abort
-            continue;
+            failsByToken.delete(core.tokenId);
           }
-          // Persistent non-token error (5xx/network) or rotations exhausted → skip this
-          // user rather than persisting a permanent hollow record.
-          logger.warn(`[bucket] profile fetch failed for ${username}: ${e.message}`);
-          skip = true;
-          break;
+          core = await makeCoreClient(ctx); // re-acquire: same token if still warm, else the next
+          if (!core) { skip = true; break; } // capacity/abort
+          continue;
         }
       }
       await sleep(PROFILE_FETCH_DELAY_MS);

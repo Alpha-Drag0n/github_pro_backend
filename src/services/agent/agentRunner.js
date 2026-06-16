@@ -23,21 +23,24 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function makeAgentId() {
-  return `${os.hostname()}:${process.pid}:${Math.random().toString(36).slice(2, 8)}`;
-}
-
 /**
  * Start an agent. Returns { agentId, stop() }.
- * @param {object} [opts] { agentId, capabilities }
+ * @param {object} [opts] { agentId, ordinal, instanceId, capabilities }
+ *   Identity is STABLE across redeploys: agentId wins, else
+ *   `${RENDER_SERVICE_ID || AGENT_NAME || host}-${ordinal ?? pid}`, so the same logical
+ *   agent slot reuses its record instead of creating a new one on every deploy.
  */
 async function startAgent(opts = {}) {
   const capabilities = opts.capabilities || Object.keys(HANDLERS);
-  const agentId = opts.agentId || makeAgentId();
+  const base = process.env.RENDER_SERVICE_ID || process.env.AGENT_NAME || os.hostname();
+  const agentId = opts.agentId || `${base}-${opts.ordinal != null ? opts.ordinal : process.pid}`;
+  // Unique per process boot. A newer deploy registering the SAME agentId supersedes this one.
+  const instanceId = opts.instanceId || process.env.RENDER_INSTANCE_ID || `${os.hostname()}:${process.pid}`;
 
   let stopped = false;
   let currentTask = null;
   let leaseLost = false;
+  let superseded = false;
   let control = { command: 'run', assignTaskId: null };
   const metricsInc = {}; // buffered, flushed on heartbeat
 
@@ -57,6 +60,7 @@ async function startAgent(opts = {}) {
     pid: process.pid,
     version: process.env.npm_package_version || '1.0.0',
     capabilities,
+    instanceId,
   });
   logger.info(`[agent ${agentId}] started (capabilities: ${capabilities.join(', ')})`);
 
@@ -67,12 +71,15 @@ async function startAgent(opts = {}) {
       for (const k of Object.keys(metricsInc)) {
         if (metricsInc[k]) { inc[k] = metricsInc[k]; metricsInc[k] = 0; }
       }
-      control =
-        (await agentRegistry.heartbeat(agentId, {
-          status: statusFor(),
-          currentTaskId: currentTask ? currentTask._id : null,
-          metricsInc: inc,
-        })) || control;
+      const beat = await agentRegistry.heartbeat(agentId, {
+        status: statusFor(),
+        currentTaskId: currentTask ? currentTask._id : null,
+        metricsInc: inc,
+      });
+      if (beat) {
+        control = beat.control || control;
+        if (beat.instanceId && beat.instanceId !== instanceId) superseded = true; // newer deploy took over
+      }
 
       if (currentTask) {
         const ok = await taskQueue.renewLease(currentTask._id, agentId, currentTask.leaseEpoch);
@@ -84,7 +91,7 @@ async function startAgent(opts = {}) {
   }, HEARTBEAT_MS);
 
   const shouldAbort = async () =>
-    leaseLost || control.command === 'preempt' || control.command === 'stop';
+    leaseLost || superseded || control.command === 'preempt' || control.command === 'stop';
 
   async function runTask(task) {
     currentTask = task;
@@ -169,11 +176,21 @@ async function startAgent(opts = {}) {
         // Refresh the command channel quickly so pause/stop/preempt/assign react within
         // ~CLAIM_IDLE_BACKOFF_MS (not the 15s heartbeat), and reflect the status promptly.
         const fresh = await agentRegistry.readControl(agentId);
-        if (fresh) control = fresh;
+        if (fresh) {
+          control = fresh.control || control;
+          if (fresh.instanceId && fresh.instanceId !== instanceId) superseded = true;
+        }
         await agentRegistry
           .setStatus(agentId, statusFor(), currentTask ? currentTask._id : null)
           .catch(() => {});
 
+        // A newer deploy took over this agentId → release current work (the handler aborts
+        // via shouldAbort and the task returns to 'pending') and stop claiming. Render's
+        // SIGTERM then becomes a backstop rather than the trigger.
+        if (superseded) {
+          logger.info(`[agent ${agentId}] superseded by a newer instance — draining`);
+          break;
+        }
         if (control.command === 'stop') break;
         if (control.command === 'pause') {
           await sleep(CLAIM_IDLE_BACKOFF_MS);
@@ -204,8 +221,9 @@ async function startAgent(opts = {}) {
       }
     }
     clearInterval(hb);
-    await agentRegistry.markStopped(agentId);
-    logger.info(`[agent ${agentId}] stopped`);
+    // Don't overwrite the shared record's status if a newer instance now owns this agentId.
+    if (!superseded) await agentRegistry.markStopped(agentId);
+    logger.info(`[agent ${agentId}] stopped${superseded ? ' (superseded by newer deploy)' : ''}`);
   })();
 
   const stop = async () => {
@@ -217,7 +235,7 @@ async function startAgent(opts = {}) {
         .releaseTask(currentTask._id, agentId, currentTask.leaseEpoch, 'pending', true)
         .catch(() => {});
     }
-    await agentRegistry.markStopped(agentId).catch(() => {});
+    if (!superseded) await agentRegistry.markStopped(agentId).catch(() => {});
   };
 
   return { agentId, stop };
