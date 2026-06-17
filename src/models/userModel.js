@@ -54,6 +54,40 @@ const userSchema = new mongoose.Schema({
   github_created_at: Date,
   github_updated_at: Date,
 
+  // ========== LinkedIn Enrichment (from Apify LinkedIn actor) ==========
+  // Populated by enriching a user's LinkedIn URL(s) (socialProfiles.linkedin[].url) through the
+  // Apify LinkedIn profile actor. A user may have SEVERAL LinkedIn URLs, so every URL is checked
+  // and each result is stored in `profiles[]`. `status` is a roll-up over them ('found' if any URL
+  // resolved) used by filters/stats/resume. Its own sub-document so it never mixes with GitHub data.
+  linkedinInfo: {
+    status: { type: String }, // roll-up: 'found' | 'not_found' | 'error' (non-empty = processed → skip on resume)
+    profiles: [
+      {
+        sourceUrl: String, // the LinkedIn URL we queried (from socialProfiles)
+        status: String, // 'found' | 'not_found' | 'error' for this specific URL
+        fullName: String,
+        profileUrl: String, // canonical LinkedIn URL returned by the actor
+        headline: String,
+        location: {
+          linkedinText: String, // verbatim LinkedIn location label
+          countryCode: String,
+          parsed: {
+            text: String,
+            countryCode: String,
+            regionCode: String,
+            country: String,
+            countryFull: String,
+            state: String,
+            city: String,
+          },
+        },
+        connectionsCount: Number,
+        followerCount: Number,
+      },
+    ],
+    updatedAt: Date,
+  },
+
   // ========== EXISTING Email Fields (backward compatibility) ==========
   readme: String, // GitHub profile README
   emails: [String], // Flat list (legacy, use contactInfo.emails for new data)
@@ -217,6 +251,8 @@ userSchema.index({ 'contactInfo.phone.number': 1 });
 userSchema.index({ 'socialProfiles.linkedin.handle': 1 });
 userSchema.index({ 'repositoryMining.locations.location': 1 });
 userSchema.index({ 'repositoryMining.miningInProgress': 1 });
+userSchema.index({ 'linkedinInfo.status': 1 });
+userSchema.index({ 'linkedinInfo.profiles.location.parsed.countryCode': 1 });
 
 // ========== Pre-save Hook for updatedAt ==========
 userSchema.pre('save', function (next) {

@@ -16,6 +16,7 @@ const Database = require('./utils/database');
 const Logger = require('./utils/logger');
 const { initializeTokensFromDatabase } = require('./utils/tokenInitializer');
 const tokenRoutes = require('./routes/tokenRoutes');
+const apifyTokenRoutes = require('./routes/apifyTokenRoutes');
 const quickSearchRoutes = require('./routes/quickSearchRoutes');
 const deepSearchRoutes = require('./routes/deepSearchRoutes');
 const miningRoutes = require('./routes/miningRoutes');
@@ -79,6 +80,7 @@ app.use('/api/admin', adminRoutes);
 
 // Protected API routes
 app.use('/api', authenticate, tokenRoutes);
+app.use('/api', authenticate, apifyTokenRoutes);
 app.use('/api', authenticate, quickSearchRoutes);
 app.use('/api', authenticate, deepSearchRoutes);
 app.use('/api', authenticate, agentRoutes);
