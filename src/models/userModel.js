@@ -44,7 +44,7 @@ const userSchema = new mongoose.Schema({
     rocketreach: {
       value: String, // location string from RocketReach, e.g. "San Francisco, California, US" ('' when not found)
       linkedinUrl: String, // the LinkedIn URL that was looked up
-      status: { type: String }, // 'found' | 'not_found'
+      status: { type: String }, // 'found' | 'not_found' | 'error' (any non-empty status means "processed" → skipped on resume)
       updatedAt: Date,
     },
   },
