@@ -41,20 +41,54 @@ async function verifyToken(token) {
 
 /**
  * Pick the active Apify token to use for a run.
- * Highest priority first, then oldest (stable rotation start). Falls back to the
- * APIFY_API_TOKEN env var so enrichment still works before any DB token is added.
+ * Highest priority first, then oldest — so the SAME token is used for every run
+ * until it fails (Apify is credit-metered, not rate-limited, so there's no reason
+ * to spread load). `excludeIds` skips tokens already disabled this run; `excludeEnv`
+ * skips the env fallback once it has failed. Falls back to the APIFY_API_TOKEN env
+ * var so enrichment still works before any DB token is added.
  * Returns a token document (or a synthetic { token } when only the env var exists).
  */
-async function selectToken() {
-  const doc = await ApifyToken.findOne({ isActive: true, status: 'active' }).sort({
-    priority: -1,
-    createdAt: 1,
-  });
+async function selectToken({ excludeIds = [], excludeEnv = false } = {}) {
+  const query = { isActive: true, status: 'active' };
+  if (excludeIds.length) query._id = { $nin: excludeIds };
+  const doc = await ApifyToken.findOne(query).sort({ priority: -1, createdAt: 1 });
   if (doc) return doc;
-  if (process.env.APIFY_API_TOKEN) {
+  if (!excludeEnv && process.env.APIFY_API_TOKEN) {
     return { token: process.env.APIFY_API_TOKEN, _envOnly: true };
   }
   return null;
+}
+
+/**
+ * Whether an Apify error means THIS token is unusable (so we disable it and move to
+ * the next), vs. a transient problem (timeout, 5xx, rate limit) that shouldn't kill
+ * a good token. Token-dead cases: bad/expired token, exhausted credits, blocked
+ * account → HTTP 401/402/403, or an error body mentioning auth/credit/usage limits.
+ */
+function isTokenFailure(error) {
+  const status = error.response?.status;
+  if (status && [401, 402, 403].includes(status)) return true;
+  const type = error.response?.data?.error?.type || '';
+  const message = error.response?.data?.error?.message || '';
+  return /limit-exceeded|usage|credit|payment|unauthor|forbidden|invalid.*token|token.*invalid/i.test(
+    `${type} ${message}`
+  );
+}
+
+/** Disable a token so it drops out of selection (no-op for the env-only token). */
+async function disableToken(tokenDoc, reason) {
+  if (!tokenDoc || tokenDoc._envOnly || typeof tokenDoc.save !== 'function') return;
+  try {
+    tokenDoc.isActive = false;
+    tokenDoc.status = 'invalid';
+    tokenDoc.errorCount = (tokenDoc.errorCount || 0) + 1;
+    tokenDoc.failureReason = reason;
+    tokenDoc.lastUsed = new Date();
+    await tokenDoc.save();
+    logger.warn(`Apify token "${tokenDoc.name}" disabled: ${reason}`);
+  } catch (e) {
+    logger.warn(`Failed to disable Apify token: ${e.message}`);
+  }
 }
 
 /**
@@ -72,18 +106,46 @@ function normalizeLinkedInUrl(url) {
     .replace(/\/+$/, '');
 }
 
+// Detects a LinkedIn profile/company URL in ANY common form — with or without a
+// scheme, with or without `www.`/country subdomain. The `\b` before `linkedin`
+// keeps it from matching look-alikes like `mylinkedin.com`.
+const LINKEDIN_URL_RE = /\blinkedin\.com\/\S+/i;
+
+/** True if a stored value is a usable LinkedIn URL (regardless of scheme). */
+function isLinkedInUrl(url) {
+  return LINKEDIN_URL_RE.test(String(url || ''));
+}
+
+/** Every distinct usable LinkedIn URL on a user document (a user may have several). */
+function allLinkedInUrls(user) {
+  const urls = (user?.socialProfiles?.linkedin || [])
+    .map((l) => (l && l.url ? String(l.url).trim() : ''))
+    .filter((u) => isLinkedInUrl(u));
+  return [...new Set(urls)];
+}
+
+/** Ensure a URL has a scheme so the Apify actor accepts it (prepends https://). */
+function toQueryUrl(url) {
+  let u = String(url || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u.replace(/^\/+/, '');
+  return u;
+}
+
 /**
- * Map a single Apify dataset item to our `linkedinInfo` sub-document shape.
+ * Map a single Apify dataset item to one `linkedinInfo.profiles[]` entry.
  * The actor returns rows positionally aligned with the input queries; rows for
  * companies / failed lookups come back as all-null. `queriedUrl` is the URL we
- * asked for, preserved so we can join the row back to the right user.
+ * asked for, preserved so we can join the row back to the right user/URL.
  */
-function mapItemToLinkedInInfo(item, queriedUrl) {
+function mapItemToProfile(item, queriedUrl) {
   const found = !!(item && item.profileUrl && item.fullName);
   const loc = (item && item.location) || null;
   const parsed = (loc && loc.parsed) || {};
 
   return {
+    sourceUrl: queriedUrl || item?.profileUrl || null,
+    status: found ? 'found' : 'not_found',
     fullName: item?.fullName || null,
     profileUrl: item?.profileUrl || null,
     headline: item?.headline || null,
@@ -104,14 +166,17 @@ function mapItemToLinkedInInfo(item, queriedUrl) {
       : null,
     connectionsCount: typeof item?.connectionsCount === 'number' ? item.connectionsCount : null,
     followerCount: typeof item?.followerCount === 'number' ? item.followerCount : null,
-    sourceUrl: queriedUrl || item?.profileUrl || null,
-    status: found ? 'found' : 'not_found',
-    updatedAt: new Date(),
   };
 }
 
 /**
  * Run the LinkedIn actor for a batch of profile URLs and return mapped results.
+ *
+ * Uses ONE token at a time (the highest-priority active one). If that token fails
+ * with a token-dead error (bad token / exhausted credits), it is DISABLED and the
+ * same batch is retried on the next active token — i.e. tokens are consumed one by
+ * one, not load-balanced. Transient errors (timeout, 5xx, rate limit) are NOT
+ * blamed on the token and are surfaced to the caller without disabling it.
  *
  * @param {string[]} urls - LinkedIn profile URLs to enrich
  * @param {object}   [opts]
@@ -124,47 +189,62 @@ async function enrichLinkedInProfiles(urls, opts = {}) {
     return { tokenDoc: null, byUrl: new Map(), raw: [] };
   }
 
-  const tokenDoc = await selectToken();
-  if (!tokenDoc) {
-    const err = new Error('No Apify token available. Add one under Tokens → Apify.');
-    err.code = 'NO_APIFY_TOKEN';
-    throw err;
+  const input = { countryFilter: opts.countryFilter || [], queries: cleanUrls };
+  const triedIds = []; // DB token _ids disabled this run, skipped on the next select
+  let triedEnv = false; // env fallback failed → don't reselect it
+
+  // Walk active tokens one by one until one succeeds or none remain.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const tokenDoc = await selectToken({ excludeIds: triedIds, excludeEnv: triedEnv });
+    if (!tokenDoc) {
+      const err = new Error(
+        triedIds.length || triedEnv
+          ? 'All Apify tokens failed (disabled). Add a working token under Tokens → Apify.'
+          : 'No Apify token available. Add one under Tokens → Apify.'
+      );
+      err.code = 'NO_APIFY_TOKEN';
+      throw err;
+    }
+
+    let items;
+    try {
+      const res = await axios.post(
+        `${APIFY_BASE}/acts/${LINKEDIN_ACTOR_ID}/run-sync-get-dataset-items`,
+        input,
+        { params: { token: tokenDoc.token }, timeout: RUN_TIMEOUT_MS }
+      );
+      items = Array.isArray(res.data) ? res.data : [];
+      await recordTokenUsage(tokenDoc, { ok: true });
+    } catch (error) {
+      if (isTokenFailure(error)) {
+        // This token is dead — disable it and fall through to the next one.
+        await disableToken(tokenDoc, error.response?.data?.error?.message || error.message);
+        if (tokenDoc._envOnly) triedEnv = true;
+        else triedIds.push(tokenDoc._id);
+        continue;
+      }
+      // Transient / non-token error — keep the token, surface the failure.
+      await recordTokenUsage(tokenDoc, { ok: false, reason: error.message });
+      logger.error(`Apify LinkedIn enrichment failed (token "${tokenDoc.name || 'env'}"): ${error.message}`);
+      throw error;
+    }
+
+    // Join results back to the queried URLs. Prefer the actor's profileUrl (it may
+    // be a canonicalized vanity URL), then fall back to positional alignment.
+    const byUrl = new Map();
+    items.forEach((item, idx) => {
+      const queriedUrl = cleanUrls[idx]; // positional fallback
+      const info = mapItemToProfile(item, queriedUrl);
+      if (item?.profileUrl) byUrl.set(normalizeLinkedInUrl(item.profileUrl), info);
+      if (queriedUrl) byUrl.set(normalizeLinkedInUrl(queriedUrl), info);
+    });
+
+    const enrichedCount = items.filter((i) => i && i.profileUrl && i.fullName).length;
+    await recordTokenUsage(tokenDoc, { profiles: enrichedCount, finalize: true });
+
+    return { tokenDoc, byUrl, raw: items };
   }
-
-  const input = {
-    countryFilter: opts.countryFilter || [],
-    queries: cleanUrls,
-  };
-
-  let items = [];
-  try {
-    const res = await axios.post(
-      `${APIFY_BASE}/acts/${LINKEDIN_ACTOR_ID}/run-sync-get-dataset-items`,
-      input,
-      { params: { token: tokenDoc.token }, timeout: RUN_TIMEOUT_MS }
-    );
-    items = Array.isArray(res.data) ? res.data : [];
-    await recordTokenUsage(tokenDoc, { ok: true, profiles: 0 });
-  } catch (error) {
-    await recordTokenUsage(tokenDoc, { ok: false, reason: error.message });
-    logger.error(`Apify LinkedIn enrichment failed: ${error.message}`);
-    throw error;
-  }
-
-  // Join results back to the queried URLs. Prefer the actor's profileUrl (it may
-  // be a canonicalized vanity URL), then fall back to positional alignment.
-  const byUrl = new Map();
-  items.forEach((item, idx) => {
-    const queriedUrl = cleanUrls[idx]; // positional fallback
-    const info = mapItemToLinkedInInfo(item, queriedUrl);
-    if (item?.profileUrl) byUrl.set(normalizeLinkedInUrl(item.profileUrl), info);
-    if (queriedUrl) byUrl.set(normalizeLinkedInUrl(queriedUrl), info);
-  });
-
-  const enrichedCount = items.filter((i) => i && i.profileUrl && i.fullName).length;
-  await recordTokenUsage(tokenDoc, { ok: true, profiles: enrichedCount, finalize: true });
-
-  return { tokenDoc, byUrl, raw: items };
 }
 
 /** Increment counters on the token document (no-op for env-only tokens). */
@@ -193,6 +273,9 @@ module.exports = {
   selectToken,
   enrichLinkedInProfiles,
   normalizeLinkedInUrl,
-  mapItemToLinkedInInfo,
+  isLinkedInUrl,
+  allLinkedInUrls,
+  toQueryUrl,
+  mapItemToProfile,
   LINKEDIN_ACTOR_ID,
 };

@@ -140,8 +140,13 @@ const HAS_ROCKETREACH_FOUND = { 'locationInfo.rocketreach.status': 'found' };
 //   linkedinInfoFound=no  → users without a resolved profile (not_found OR never enriched)
 const HAS_LINKEDIN_INFO = { 'linkedinInfo.status': { $nin: [null, ''] } };
 const HAS_LINKEDIN_INFO_FOUND = { 'linkedinInfo.status': 'found' };
-// A LinkedIn entry carrying a usable URL (the join key for enrichment). Mirrors PRESENCE_FIELDS.linkedinUrl.
-const HAS_USABLE_LINKEDIN_URL = { 'socialProfiles.linkedin.0.url': { $type: 'string', $ne: '' } };
+// A LinkedIn entry carrying an ENRICHABLE URL on ANY entry. Accepts every common
+// form — with/without scheme, with/without www. or a country subdomain — matching
+// apifyService.isLinkedInUrl(). The `\b` before `linkedin` avoids look-alikes like
+// `mylinkedin.com`. Keeps the "unprocessed" count aligned with what we actually send.
+const HAS_USABLE_LINKEDIN_URL = {
+  'socialProfiles.linkedin': { $elemMatch: { url: { $regex: '\\blinkedin\\.com/\\S+', $options: 'i' } } },
+};
 
 /** Build the Mongo filter for the deep-search users query from request params. */
 function buildDeepUserFilter(q) {
@@ -239,52 +244,53 @@ router.get('/deep-searches/users', async (req, res) => {
 // Hard cap on how many profiles one actor run handles (keeps a single request bounded).
 const MAX_LINKEDIN_BATCH = 100;
 
-/** First usable LinkedIn profile URL on a user document, or '' if none. */
-function firstLinkedInUrl(user) {
-  return (user.socialProfiles?.linkedin || [])
-    .map((l) => (l && l.url ? String(l.url).trim() : ''))
-    .find((u) => /^https?:\/\/\S+linkedin\.com\/\S+/i.test(u)) || '';
-}
-
 /**
- * Run a batch of user docs through the Apify actor and persist each result onto
- * `linkedinInfo`. Users with no usable URL are skipped; users with a URL but no
- * match are recorded 'not_found' so resume queries skip them.
- * Returns { processed, found, notFound, skipped, results }.
+ * Run a batch of user docs through the Apify actor and persist results onto
+ * `linkedinInfo`. A user may have SEVERAL LinkedIn URLs — every URL is checked and
+ * stored in `linkedinInfo.profiles[]`; `linkedinInfo.status` rolls up to 'found' if
+ * any of them resolved. All URLs across all users go out in ONE actor run.
+ * Returns { processed, found, notFound, skipped, results } (counts are per user).
  */
 async function enrichUserDocs(users) {
-  const targets = []; // { user, url }
+  // Collect every usable LinkedIn URL per user (a user may have multiple).
+  const targets = []; // { user, urls: [originalUrl, ...] }
   for (const user of users) {
-    const url = firstLinkedInUrl(user);
-    if (url) targets.push({ user, url });
+    const urls = apifyService.allLinkedInUrls(user);
+    if (urls.length) targets.push({ user, urls });
   }
   if (targets.length === 0) {
     return { processed: 0, found: 0, notFound: 0, skipped: users.length, results: [] };
   }
 
-  const { byUrl } = await apifyService.enrichLinkedInProfiles(targets.map((t) => t.url));
+  // One actor run for the union of all URLs (scheme-normalized so Apify accepts them).
+  const allUrls = targets.flatMap((t) => t.urls.map((u) => apifyService.toQueryUrl(u)));
+  const { byUrl } = await apifyService.enrichLinkedInProfiles(allUrls);
 
   const results = [];
   let found = 0;
   let notFound = 0;
-  for (const { user, url } of targets) {
-    const matched = byUrl.get(apifyService.normalizeLinkedInUrl(url));
-    const info = matched || {
-      fullName: null,
-      profileUrl: null,
-      headline: null,
-      location: null,
-      connectionsCount: null,
-      followerCount: null,
-      sourceUrl: url,
-      status: 'not_found',
-      updatedAt: new Date(),
-    };
-    info.sourceUrl = url; // keep the URL we actually queried as the join key
+  for (const { user, urls } of targets) {
+    // Build one profile entry per URL this user has.
+    const profiles = urls.map((u) => {
+      const matched = byUrl.get(apifyService.normalizeLinkedInUrl(u));
+      if (matched) return { ...matched, sourceUrl: u };
+      return {
+        sourceUrl: u,
+        status: 'not_found',
+        fullName: null,
+        profileUrl: null,
+        headline: null,
+        location: null,
+        connectionsCount: null,
+        followerCount: null,
+      };
+    });
+    const anyFound = profiles.some((p) => p.status === 'found');
+    const info = { status: anyFound ? 'found' : 'not_found', profiles, updatedAt: new Date() };
 
     await User.findByIdAndUpdate(user._id, { $set: { linkedinInfo: info } }, { runValidators: true });
 
-    if (info.status === 'found') found += 1;
+    if (anyFound) found += 1;
     else notFound += 1;
     results.push({ userId: user._id, username: user.username, status: info.status, linkedinInfo: info });
   }
@@ -346,23 +352,63 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
       return res.json({ message: 'LinkedIn enrichment complete', mode: 'ids', requested: ids.length, ...out });
     }
 
-    // Mode B: filter-driven bulk — drain UNPROCESSED users matching the filter.
+    // Mode B: filter-driven bulk. Two sub-modes matching the filter:
+    //   default → drain UNPROCESSED users (have a URL, never enriched)
+    //   retry   → re-process users already enriched but NOT found (not_found/error)
     if (filter && typeof filter === 'object') {
       const batch = Math.min(MAX_LINKEDIN_BATCH, Math.max(1, parseInt(max, 10) || 25));
+      const retry = req.body?.mode === 'retry';
       const q = { ...filter };
       delete q.linkedinInfoHas;
       delete q.linkedinInfoFound;
-      const unprocessedFilter = {
-        $and: [buildDeepUserFilter(q), HAS_USABLE_LINKEDIN_URL, { $nor: [HAS_LINKEDIN_INFO] }],
-      };
+      const base = buildDeepUserFilter(q);
 
-      const users = await User.find(unprocessedFilter).sort({ extractedAt: -1 }).limit(batch);
+      let targetFilter;
+      let sort;
+      if (retry) {
+        // `before` (cutoff timestamp from the client, captured when the run started)
+        // guarantees one clean sweep: each re-processed user gets a newer updatedAt
+        // and drops below the cutoff, so the set drains even if it stays not_found.
+        const before = req.body?.before ? new Date(req.body.before) : new Date();
+        targetFilter = {
+          $and: [
+            base,
+            HAS_USABLE_LINKEDIN_URL,
+            HAS_LINKEDIN_INFO,
+            { $nor: [HAS_LINKEDIN_INFO_FOUND] },
+            { 'linkedinInfo.updatedAt': { $lt: before } },
+          ],
+        };
+        sort = { 'linkedinInfo.updatedAt': 1 }; // oldest-tried first
+      } else {
+        targetFilter = { $and: [base, HAS_USABLE_LINKEDIN_URL, { $nor: [HAS_LINKEDIN_INFO] }] };
+        sort = { extractedAt: -1 };
+      }
+
+      const users = await User.find(targetFilter).sort(sort).limit(batch);
       if (users.length === 0) {
-        return res.json({ message: 'Nothing to enrich', mode: 'filter', processed: 0, found: 0, notFound: 0, skipped: 0, results: [], remaining: 0 });
+        return res.json({ message: 'Nothing to enrich', mode: retry ? 'retry' : 'filter', processed: 0, found: 0, notFound: 0, skipped: 0, results: [], handled: 0, remaining: 0 });
       }
       const out = await enrichUserDocs(users);
-      const remaining = await User.countDocuments(unprocessedFilter);
-      return res.json({ message: 'LinkedIn enrichment complete', mode: 'filter', ...out, remaining });
+
+      // Drain any fetched user that yielded no usable URL by writing a marker, so the
+      // bulk loop always makes progress (only relevant in unprocessed mode — retry
+      // targets already carry a URL). Guarantees termination.
+      if (!retry) {
+        const enrichedIds = new Set(out.results.map((r) => String(r.userId)));
+        const stuck = users.filter((u) => !enrichedIds.has(String(u._id)));
+        if (stuck.length) {
+          await User.updateMany(
+            { _id: { $in: stuck.map((u) => u._id) } },
+            { $set: { linkedinInfo: { status: 'error', profiles: [], updatedAt: new Date() } } }
+          );
+        }
+      }
+
+      // Every processed user now has a fresh updatedAt → it leaves the target set.
+      const handled = users.length;
+      const remaining = await User.countDocuments(targetFilter);
+      return res.json({ message: 'LinkedIn enrichment complete', mode: retry ? 'retry' : 'filter', ...out, handled, remaining });
     }
 
     return res.status(400).json({ error: 'Provide ids[] or filter{}' });
@@ -372,6 +418,38 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
     }
     logger.error(`Error enriching LinkedIn profiles: ${error.message}`);
     res.status(500).json({ error: 'Failed to enrich LinkedIn profiles' });
+  }
+});
+
+/**
+ * ONE-OFF migration: clear stale `linkedinInfo` so those users can be re-enriched.
+ * POST /api/deep-searches/users/linkedin-reset-stale
+ * Body:
+ *   {}              → reset only OLD-SHAPE docs (have linkedinInfo but no profiles[] array)
+ *   { all: true }   → reset EVERY enriched user (full re-enrich)
+ * Unsets `linkedinInfo` entirely, dropping the users back into the "unprocessed" set.
+ * Declared before '/deep-searches/:id'. Safe to remove once the migration is done.
+ */
+router.post('/deep-searches/users/linkedin-reset-stale', async (req, res) => {
+  try {
+    const all = req.body?.all === true;
+    const filter = all
+      ? { linkedinInfo: { $exists: true } }
+      : { linkedinInfo: { $exists: true }, 'linkedinInfo.profiles': { $exists: false } };
+
+    const matched = await User.countDocuments(filter);
+    const result = await User.updateMany(filter, { $unset: { linkedinInfo: '' } });
+
+    logger.info(`LinkedIn reset (${all ? 'all' : 'stale'}): cleared ${result.modifiedCount}/${matched}`);
+    res.json({
+      message: all ? 'Reset all LinkedIn enrichment' : 'Reset stale (old-shape) LinkedIn enrichment',
+      mode: all ? 'all' : 'stale',
+      matched,
+      modified: result.modifiedCount ?? result.nModified ?? 0,
+    });
+  } catch (error) {
+    logger.error(`Error resetting LinkedIn enrichment: ${error.message}`);
+    res.status(500).json({ error: 'Failed to reset LinkedIn enrichment' });
   }
 });
 
