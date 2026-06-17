@@ -14,6 +14,7 @@ const Logger = require('../utils/logger');
 const requestLogService = require('../services/requestLogService');
 const SearchTokenPool = require('../services/searchTokenPool');
 const iterativeSearchService = require('../services/deepSearchService');
+const apifyService = require('../services/apifyService');
 const Task = require('../models/taskModel');
 const taskQueue = require('../services/agent/taskQueue');
 
@@ -134,6 +135,13 @@ const HAS_DISCOVERED_LOCATION = { 'locationInfo.discovered.0': { $exists: true }
 //   rocketreachFound=no → users without a found location (not_found OR never processed) — for retrying misses
 const HAS_ROCKETREACH = { 'locationInfo.rocketreach.status': { $nin: [null, ''] } };
 const HAS_ROCKETREACH_FOUND = { 'locationInfo.rocketreach.status': 'found' };
+// LinkedIn (Apify) enrichment state — used to resume/retry enrichment runs:
+//   linkedinInfoHas=no    → users never enriched (no status at all)
+//   linkedinInfoFound=no  → users without a resolved profile (not_found OR never enriched)
+const HAS_LINKEDIN_INFO = { 'linkedinInfo.status': { $nin: [null, ''] } };
+const HAS_LINKEDIN_INFO_FOUND = { 'linkedinInfo.status': 'found' };
+// A LinkedIn entry carrying a usable URL (the join key for enrichment). Mirrors PRESENCE_FIELDS.linkedinUrl.
+const HAS_USABLE_LINKEDIN_URL = { 'socialProfiles.linkedin.0.url': { $type: 'string', $ne: '' } };
 
 /** Build the Mongo filter for the deep-search users query from request params. */
 function buildDeepUserFilter(q) {
@@ -169,6 +177,13 @@ function buildDeepUserFilter(q) {
   // RocketReach found a location: yes | no  (no = not_found or never processed)
   if (q.rocketreachFound === 'yes') and.push(HAS_ROCKETREACH_FOUND);
   else if (q.rocketreachFound === 'no') and.push({ $nor: [HAS_ROCKETREACH_FOUND] });
+
+  // LinkedIn (Apify) enrichment processed (any status): yes | no
+  if (q.linkedinInfoHas === 'yes') and.push(HAS_LINKEDIN_INFO);
+  else if (q.linkedinInfoHas === 'no') and.push({ $nor: [HAS_LINKEDIN_INFO] });
+  // LinkedIn (Apify) enrichment resolved a profile: yes | no
+  if (q.linkedinInfoFound === 'yes') and.push(HAS_LINKEDIN_INFO_FOUND);
+  else if (q.linkedinInfoFound === 'no') and.push({ $nor: [HAS_LINKEDIN_INFO_FOUND] });
 
   // Per-field presence toggles: <field>Has = 'yes' | 'no'
   for (const [field, cond] of Object.entries(PRESENCE_FIELDS)) {
@@ -216,6 +231,147 @@ router.get('/deep-searches/users', async (req, res) => {
   } catch (error) {
     logger.error(`Error fetching unified deep-search users: ${error.message}`);
     res.status(500).json({ error: 'Failed to fetch results' });
+  }
+});
+
+// ===== LinkedIn enrichment via the Apify actor =====
+
+// Hard cap on how many profiles one actor run handles (keeps a single request bounded).
+const MAX_LINKEDIN_BATCH = 100;
+
+/** First usable LinkedIn profile URL on a user document, or '' if none. */
+function firstLinkedInUrl(user) {
+  return (user.socialProfiles?.linkedin || [])
+    .map((l) => (l && l.url ? String(l.url).trim() : ''))
+    .find((u) => /^https?:\/\/\S+linkedin\.com\/\S+/i.test(u)) || '';
+}
+
+/**
+ * Run a batch of user docs through the Apify actor and persist each result onto
+ * `linkedinInfo`. Users with no usable URL are skipped; users with a URL but no
+ * match are recorded 'not_found' so resume queries skip them.
+ * Returns { processed, found, notFound, skipped, results }.
+ */
+async function enrichUserDocs(users) {
+  const targets = []; // { user, url }
+  for (const user of users) {
+    const url = firstLinkedInUrl(user);
+    if (url) targets.push({ user, url });
+  }
+  if (targets.length === 0) {
+    return { processed: 0, found: 0, notFound: 0, skipped: users.length, results: [] };
+  }
+
+  const { byUrl } = await apifyService.enrichLinkedInProfiles(targets.map((t) => t.url));
+
+  const results = [];
+  let found = 0;
+  let notFound = 0;
+  for (const { user, url } of targets) {
+    const matched = byUrl.get(apifyService.normalizeLinkedInUrl(url));
+    const info = matched || {
+      fullName: null,
+      profileUrl: null,
+      headline: null,
+      location: null,
+      connectionsCount: null,
+      followerCount: null,
+      sourceUrl: url,
+      status: 'not_found',
+      updatedAt: new Date(),
+    };
+    info.sourceUrl = url; // keep the URL we actually queried as the join key
+
+    await User.findByIdAndUpdate(user._id, { $set: { linkedinInfo: info } }, { runValidators: true });
+
+    if (info.status === 'found') found += 1;
+    else notFound += 1;
+    results.push({ userId: user._id, username: user.username, status: info.status, linkedinInfo: info });
+  }
+
+  return { processed: targets.length, found, notFound, skipped: users.length - targets.length, results };
+}
+
+/**
+ * LinkedIn enrichment coverage stats for the current filter context.
+ * GET /api/deep-searches/users/linkedin-stats?<same filters as the users list>
+ * The linkedin enrichment toggles (linkedinInfoHas/Found) are ignored so the counts
+ * stay stable as the user flips those filters. Declared before '/deep-searches/:id'.
+ */
+router.get('/deep-searches/users/linkedin-stats', async (req, res) => {
+  try {
+    const q = { ...req.query };
+    delete q.linkedinInfoHas;
+    delete q.linkedinInfoFound;
+    const base = buildDeepUserFilter(q);
+
+    const withUrl = await User.countDocuments({ $and: [base, HAS_USABLE_LINKEDIN_URL] });
+    const processed = await User.countDocuments({ $and: [base, HAS_USABLE_LINKEDIN_URL, HAS_LINKEDIN_INFO] });
+    const found = await User.countDocuments({ $and: [base, HAS_USABLE_LINKEDIN_URL, HAS_LINKEDIN_INFO_FOUND] });
+
+    res.json({
+      withLinkedinUrl: withUrl,
+      processed,
+      found,
+      notFound: Math.max(0, processed - found),
+      unprocessed: Math.max(0, withUrl - processed),
+    });
+  } catch (error) {
+    logger.error(`Error computing LinkedIn stats: ${error.message}`);
+    res.status(500).json({ error: 'Failed to compute LinkedIn stats' });
+  }
+});
+
+/**
+ * Enrich deep-search users with LinkedIn profile data via the Apify actor.
+ * POST /api/deep-searches/users/enrich-linkedin
+ * Body (one of):
+ *   { ids: [userId, ...] }        — enrich exactly these users (explicit selection)
+ *   { filter: {...}, max?: 25 }   — enrich up to `max` UNPROCESSED users (have a URL,
+ *                                   no linkedinInfo yet) matching the given filter params;
+ *                                   returns `remaining` so the UI can loop to drain the set.
+ * Runs all selected URLs through Apify in ONE actor run. Declared before '/deep-searches/:id'.
+ */
+router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
+  try {
+    const { ids, filter, max } = req.body || {};
+
+    // Mode A: explicit ids.
+    if (Array.isArray(ids) && ids.length > 0) {
+      const users = await User.find({ _id: { $in: ids.slice(0, MAX_LINKEDIN_BATCH) } });
+      const out = await enrichUserDocs(users);
+      if (out.processed === 0) {
+        return res.status(400).json({ error: 'None of the selected users have a LinkedIn URL to enrich' });
+      }
+      return res.json({ message: 'LinkedIn enrichment complete', mode: 'ids', requested: ids.length, ...out });
+    }
+
+    // Mode B: filter-driven bulk — drain UNPROCESSED users matching the filter.
+    if (filter && typeof filter === 'object') {
+      const batch = Math.min(MAX_LINKEDIN_BATCH, Math.max(1, parseInt(max, 10) || 25));
+      const q = { ...filter };
+      delete q.linkedinInfoHas;
+      delete q.linkedinInfoFound;
+      const unprocessedFilter = {
+        $and: [buildDeepUserFilter(q), HAS_USABLE_LINKEDIN_URL, { $nor: [HAS_LINKEDIN_INFO] }],
+      };
+
+      const users = await User.find(unprocessedFilter).sort({ extractedAt: -1 }).limit(batch);
+      if (users.length === 0) {
+        return res.json({ message: 'Nothing to enrich', mode: 'filter', processed: 0, found: 0, notFound: 0, skipped: 0, results: [], remaining: 0 });
+      }
+      const out = await enrichUserDocs(users);
+      const remaining = await User.countDocuments(unprocessedFilter);
+      return res.json({ message: 'LinkedIn enrichment complete', mode: 'filter', ...out, remaining });
+    }
+
+    return res.status(400).json({ error: 'Provide ids[] or filter{}' });
+  } catch (error) {
+    if (error.code === 'NO_APIFY_TOKEN') {
+      return res.status(400).json({ error: error.message });
+    }
+    logger.error(`Error enriching LinkedIn profiles: ${error.message}`);
+    res.status(500).json({ error: 'Failed to enrich LinkedIn profiles' });
   }
 });
 

@@ -54,6 +54,33 @@ const userSchema = new mongoose.Schema({
   github_created_at: Date,
   github_updated_at: Date,
 
+  // ========== LinkedIn Enrichment (from Apify LinkedIn actor) ==========
+  // Populated by enriching a user's LinkedIn URL (socialProfiles.linkedin[].url) through the Apify
+  // LinkedIn profile actor. Its own sub-document so it never mixes with GitHub-derived fields.
+  linkedinInfo: {
+    fullName: String,
+    profileUrl: String, // canonical LinkedIn URL returned by the actor
+    headline: String,
+    location: {
+      linkedinText: String, // verbatim LinkedIn location label
+      countryCode: String,
+      parsed: {
+        text: String,
+        countryCode: String,
+        regionCode: String,
+        country: String,
+        countryFull: String,
+        state: String,
+        city: String,
+      },
+    },
+    connectionsCount: Number,
+    followerCount: Number,
+    sourceUrl: String, // the LinkedIn URL we queried (join key back to socialProfiles)
+    status: { type: String }, // 'found' | 'not_found' | 'error' (non-empty = processed → skip on resume)
+    updatedAt: Date,
+  },
+
   // ========== EXISTING Email Fields (backward compatibility) ==========
   readme: String, // GitHub profile README
   emails: [String], // Flat list (legacy, use contactInfo.emails for new data)
@@ -217,6 +244,8 @@ userSchema.index({ 'contactInfo.phone.number': 1 });
 userSchema.index({ 'socialProfiles.linkedin.handle': 1 });
 userSchema.index({ 'repositoryMining.locations.location': 1 });
 userSchema.index({ 'repositoryMining.miningInProgress': 1 });
+userSchema.index({ 'linkedinInfo.status': 1 });
+userSchema.index({ 'linkedinInfo.location.parsed.countryCode': 1 });
 
 // ========== Pre-save Hook for updatedAt ==========
 userSchema.pre('save', function (next) {
