@@ -113,6 +113,10 @@ router.get('/deep-searches', async (req, res) => {
 const PRESENCE_FIELDS = {
   email: { $or: [{ 'contactInfo.emails.0': { $exists: true } }, { 'emails.0': { $exists: true } }] },
   linkedin: { 'socialProfiles.linkedin.0': { $exists: true } },
+  // A LinkedIn entry that actually carries a URL. The RocketReach extension uses `linkedinUrlHas=yes`
+  // (not `linkedinHas`) because it needs a real URL to look up — a handle-only entry is unusable and,
+  // if counted, would never drain from the resume queue. Mirrors the client's `linkedin[0].url` read.
+  linkedinUrl: { 'socialProfiles.linkedin.0.url': { $nin: [null, ''] } },
   x: { 'socialProfiles.x.0': { $exists: true } },
   facebook: { 'socialProfiles.facebook.0': { $exists: true } },
   instagram: { 'socialProfiles.instagram.0': { $exists: true } },
@@ -125,6 +129,11 @@ const PRESENCE_FIELDS = {
 };
 const HAS_PROFILE_LOCATION = { location: { $nin: [null, ''] } };
 const HAS_DISCOVERED_LOCATION = { 'locationInfo.discovered.0': { $exists: true } };
+// RocketReach enrichment state — used by the extension to resume large runs:
+//   rocketreachHas=no   → users never processed (no status at all)
+//   rocketreachFound=no → users without a found location (not_found OR never processed) — for retrying misses
+const HAS_ROCKETREACH = { 'locationInfo.rocketreach.status': { $nin: [null, ''] } };
+const HAS_ROCKETREACH_FOUND = { 'locationInfo.rocketreach.status': 'found' };
 
 /** Build the Mongo filter for the deep-search users query from request params. */
 function buildDeepUserFilter(q) {
@@ -153,6 +162,13 @@ function buildDeepUserFilter(q) {
   // Location info (repo-discovered) presence: yes | no
   if (q.locationInfoHas === 'yes') and.push(HAS_DISCOVERED_LOCATION);
   else if (q.locationInfoHas === 'no') and.push({ $nor: [HAS_DISCOVERED_LOCATION] });
+
+  // RocketReach processed (any status) presence: yes | no
+  if (q.rocketreachHas === 'yes') and.push(HAS_ROCKETREACH);
+  else if (q.rocketreachHas === 'no') and.push({ $nor: [HAS_ROCKETREACH] });
+  // RocketReach found a location: yes | no  (no = not_found or never processed)
+  if (q.rocketreachFound === 'yes') and.push(HAS_ROCKETREACH_FOUND);
+  else if (q.rocketreachFound === 'no') and.push({ $nor: [HAS_ROCKETREACH_FOUND] });
 
   // Per-field presence toggles: <field>Has = 'yes' | 'no'
   for (const [field, cond] of Object.entries(PRESENCE_FIELDS)) {
@@ -209,13 +225,15 @@ router.get('/deep-searches/users', async (req, res) => {
  * Body: { value, linkedinUrl, status }
  *   - status 'found'      → value is the location string (required)
  *   - status 'not_found'  → RocketReach had no result; value is cleared
+ *   - status 'error'      → lookup failed for this profile; value is cleared (recorded so resume skips it)
  * Used by the RocketReach Chrome extension to persist enrichment. Writes only the
  * isolated `locationInfo.rocketreach` sub-document; never touches `location` or `discovered`.
  */
 router.patch('/deep-searches/users/:id/rocketreach-location', async (req, res) => {
   try {
     const { value, linkedinUrl, status } = req.body || {};
-    const normalizedStatus = status === 'not_found' ? 'not_found' : 'found';
+    const ALLOWED = ['found', 'not_found', 'error'];
+    const normalizedStatus = ALLOWED.includes(status) ? status : 'found';
 
     if (normalizedStatus === 'found' && !String(value || '').trim()) {
       return res.status(400).json({ error: 'value is required when status is "found"' });
