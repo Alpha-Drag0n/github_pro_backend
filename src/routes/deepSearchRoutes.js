@@ -422,38 +422,6 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
 });
 
 /**
- * ONE-OFF migration: clear stale `linkedinInfo` so those users can be re-enriched.
- * POST /api/deep-searches/users/linkedin-reset-stale
- * Body:
- *   {}              → reset only OLD-SHAPE docs (have linkedinInfo but no profiles[] array)
- *   { all: true }   → reset EVERY enriched user (full re-enrich)
- * Unsets `linkedinInfo` entirely, dropping the users back into the "unprocessed" set.
- * Declared before '/deep-searches/:id'. Safe to remove once the migration is done.
- */
-router.post('/deep-searches/users/linkedin-reset-stale', async (req, res) => {
-  try {
-    const all = req.body?.all === true;
-    const filter = all
-      ? { linkedinInfo: { $exists: true } }
-      : { linkedinInfo: { $exists: true }, 'linkedinInfo.profiles': { $exists: false } };
-
-    const matched = await User.countDocuments(filter);
-    const result = await User.updateMany(filter, { $unset: { linkedinInfo: '' } });
-
-    logger.info(`LinkedIn reset (${all ? 'all' : 'stale'}): cleared ${result.modifiedCount}/${matched}`);
-    res.json({
-      message: all ? 'Reset all LinkedIn enrichment' : 'Reset stale (old-shape) LinkedIn enrichment',
-      mode: all ? 'all' : 'stale',
-      matched,
-      modified: result.modifiedCount ?? result.nModified ?? 0,
-    });
-  } catch (error) {
-    logger.error(`Error resetting LinkedIn enrichment: ${error.message}`);
-    res.status(500).json({ error: 'Failed to reset LinkedIn enrichment' });
-  }
-});
-
-/**
  * Save a RocketReach-derived location onto a deep-search user.
  * PATCH /api/deep-searches/users/:id/rocketreach-location
  * Body: { value, linkedinUrl, status }
