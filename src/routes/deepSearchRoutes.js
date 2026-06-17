@@ -145,8 +145,45 @@ const HAS_LINKEDIN_INFO_FOUND = { 'linkedinInfo.status': 'found' };
 // apifyService.isLinkedInUrl(). The `\b` before `linkedin` avoids look-alikes like
 // `mylinkedin.com`. Keeps the "unprocessed" count aligned with what we actually send.
 const HAS_USABLE_LINKEDIN_URL = {
-  'socialProfiles.linkedin': { $elemMatch: { url: { $regex: '\\blinkedin\\.com/\\S+', $options: 'i' } } },
+  // Host-anchored: linkedin.com must be at the start, after `//`, or after a subdomain
+  // dot — so a linkedin.com path embedded in another host's URL isn't counted.
+  'socialProfiles.linkedin': { $elemMatch: { url: { $regex: '(^|//|\\.)linkedin\\.com/\\S+', $options: 'i' } } },
 };
+// Resolved "best" location values, for the have/best/not-have filters:
+//   locationInfo: best = resolved best string present; have = best OR any discovered.
+//   linkedinInfo: best = a FOUND profile that carries a location; have = processed at all.
+const HAS_LOCATIONINFO_BEST = { 'locationInfo.best': { $nin: [null, ''] } };
+const HAS_LOCATIONINFO_ANY = { $or: [HAS_LOCATIONINFO_BEST, HAS_DISCOVERED_LOCATION] };
+const HAS_LINKEDIN_BEST = {
+  'linkedinInfo.profiles': {
+    $elemMatch: {
+      status: 'found',
+      $or: [
+        { 'location.linkedinText': { $nin: [null, ''] } },
+        { 'location.parsed.country': { $nin: [null, ''] } },
+        { 'location.parsed.city': { $nin: [null, ''] } },
+      ],
+    },
+  },
+};
+
+/**
+ * Build a case-insensitive regex STRING for a free-text filter + match mode.
+ * Modes: 'startswith' | 'endswith' | 'exact' | (default) 'contain'.
+ */
+function matchRegex(value, mode) {
+  const esc = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // escape regex metachars
+  switch (mode) {
+    case 'startswith':
+      return '^' + esc;
+    case 'endswith':
+      return esc + '$';
+    case 'exact':
+      return '^' + esc + '$';
+    default:
+      return esc; // contain
+  }
+}
 
 /** Build the Mongo filter for the deep-search users query from request params. */
 function buildDeepUserFilter(q) {
@@ -193,6 +230,33 @@ function buildDeepUserFilter(q) {
   // LinkedIn (Apify) enrichment resolved a profile: yes | no
   if (q.linkedinInfoFound === 'yes') and.push(HAS_LINKEDIN_INFO_FOUND);
   else if (q.linkedinInfoFound === 'no') and.push({ $nor: [HAS_LINKEDIN_INFO_FOUND] });
+
+  // Location info state: have (best or discovered) | best (resolved best) | nothave
+  if (q.locationInfoState === 'have') and.push(HAS_LOCATIONINFO_ANY);
+  else if (q.locationInfoState === 'best') and.push(HAS_LOCATIONINFO_BEST);
+  else if (q.locationInfoState === 'nothave') and.push({ $nor: [HAS_LOCATIONINFO_ANY] });
+
+  // LinkedIn info state: have (processed) | best (found profile with a location) | nothave
+  if (q.linkedinInfoState === 'have') and.push(HAS_LINKEDIN_INFO);
+  else if (q.linkedinInfoState === 'best') and.push(HAS_LINKEDIN_BEST);
+  else if (q.linkedinInfoState === 'nothave') and.push({ $nor: [HAS_LINKEDIN_INFO] });
+
+  // Free-text match (start/contain/end/exact) against the resolved "best" value:
+  //   locationInfoValue → locationInfo.best
+  //   linkedinInfoValue → a FOUND LinkedIn profile's location (linkedinText)
+  if (q.locationInfoValue) {
+    and.push({ 'locationInfo.best': { $regex: matchRegex(q.locationInfoValue, q.locationInfoMatch), $options: 'i' } });
+  }
+  if (q.linkedinInfoValue) {
+    and.push({
+      'linkedinInfo.profiles': {
+        $elemMatch: {
+          status: 'found',
+          'location.linkedinText': { $regex: matchRegex(q.linkedinInfoValue, q.linkedinInfoMatch), $options: 'i' },
+        },
+      },
+    });
+  }
 
   // Per-field presence toggles: <field>Has = 'yes' | 'no'
   for (const [field, cond] of Object.entries(PRESENCE_FIELDS)) {
@@ -313,6 +377,9 @@ router.get('/deep-searches/users/linkedin-stats', async (req, res) => {
     const q = { ...req.query };
     delete q.linkedinInfoHas;
     delete q.linkedinInfoFound;
+    delete q.linkedinInfoState;
+    delete q.linkedinInfoValue;
+    delete q.linkedinInfoMatch;
     const base = buildDeepUserFilter(q);
 
     const withUrl = await User.countDocuments({ $and: [base, HAS_USABLE_LINKEDIN_URL] });
@@ -365,6 +432,9 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
       const q = { ...filter };
       delete q.linkedinInfoHas;
       delete q.linkedinInfoFound;
+      delete q.linkedinInfoState;
+      delete q.linkedinInfoValue;
+      delete q.linkedinInfoMatch;
       const base = buildDeepUserFilter(q);
 
       let targetFilter;
@@ -628,7 +698,37 @@ router.get('/deep-searches/:id/overview', async (req, res) => {
     const scoped = { 'searchIterationHistory.searchId': search._id };
     const withCond = (cond) => User.countDocuments({ $and: [scoped, cond] });
 
-    const [total, withEmail, withLinkedin, withLinkedinUrl, enriched, found, topLocAgg] =
+    // Per-user location for Top locations: user.location first, else the user's first
+    // FOUND LinkedIn profile location (linkedinText). locationInfo is intentionally ignored.
+    const chosenLoc = {
+      $let: {
+        vars: { gh: { $trim: { input: { $ifNull: ['$location', ''] } } } },
+        in: {
+          $cond: [
+            { $gt: [{ $strLenCP: '$$gh' }, 0] },
+            '$$gh',
+            {
+              $let: {
+                vars: {
+                  found: {
+                    $filter: {
+                      input: { $ifNull: ['$linkedinInfo.profiles', []] },
+                      as: 'p',
+                      cond: { $eq: ['$$p.status', 'found'] },
+                    },
+                  },
+                },
+                in: { $ifNull: [{ $arrayElemAt: ['$$found.location.linkedinText', 0] }, ''] },
+              },
+            },
+          ],
+        },
+      },
+    };
+    // Heuristic US match (not exact, but useful): "United States", "USA", "U.S.", or a ", US" suffix.
+    const US_REGEX = 'united states|u\\.?s\\.?a\\.?|\\bus\\b';
+
+    const [total, withEmail, withLinkedin, withLinkedinUrl, enriched, found, locAgg] =
       await Promise.all([
         User.countDocuments(scoped),
         withCond(PRESENCE_FIELDS.email),
@@ -637,12 +737,26 @@ router.get('/deep-searches/:id/overview', async (req, res) => {
         withCond(HAS_LINKEDIN_INFO),
         withCond(HAS_LINKEDIN_INFO_FOUND),
         User.aggregate([
-          { $match: { 'searchIterationHistory.searchId': search._id, location: { $nin: [null, ''] } } },
-          { $group: { _id: '$location', count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $limit: 6 },
+          { $match: scoped },
+          { $addFields: { chosenLoc: chosenLoc } },
+          {
+            $facet: {
+              top: [
+                { $match: { chosenLoc: { $nin: [null, ''] } } },
+                { $group: { _id: '$chosenLoc', count: { $sum: 1 } } },
+                { $sort: { count: -1 } },
+                { $limit: 6 },
+              ],
+              us: [
+                { $match: { chosenLoc: { $regex: US_REGEX, $options: 'i' } } },
+                { $count: 'count' },
+              ],
+            },
+          },
         ]),
       ]);
+
+    const facet = locAgg[0] || { top: [], us: [] };
 
     res.json({
       total,
@@ -651,7 +765,8 @@ router.get('/deep-searches/:id/overview', async (req, res) => {
       withLinkedinUrl,
       enriched,
       found,
-      topLocations: topLocAgg.map((l) => ({ location: l._id, count: l.count })),
+      usCount: facet.us[0]?.count || 0,
+      topLocations: (facet.top || []).map((l) => ({ location: l._id, count: l.count })),
     });
   } catch (error) {
     logger.error(`Error computing search overview: ${error.message}`);

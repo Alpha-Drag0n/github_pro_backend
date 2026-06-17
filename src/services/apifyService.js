@@ -109,14 +109,13 @@ function normalizeLinkedInUrl(url) {
     .replace(/\/+$/, '');
 }
 
-// Detects a LinkedIn profile/company URL in ANY common form — with or without a
-// scheme, with or without `www.`/country subdomain. The `\b` before `linkedin`
-// keeps it from matching look-alikes like `mylinkedin.com`.
-const LINKEDIN_URL_RE = /\blinkedin\.com\/\S+/i;
-
-/** True if a stored value is a usable LinkedIn URL (regardless of scheme). */
+/**
+ * True if a stored value is a usable LinkedIn URL — actually hosted on linkedin.com
+ * (any scheme, with/without www. or a country subdomain) with a path. Host-anchored
+ * via linkedInPath, so look-alikes (mylinkedin.com) and embedded URLs are rejected.
+ */
 function isLinkedInUrl(url) {
-  return LINKEDIN_URL_RE.test(String(url || ''));
+  return linkedInPath(url) !== '';
 }
 
 /** Every distinct usable LinkedIn URL on a user document (a user may have several). */
@@ -136,22 +135,93 @@ function toQueryUrl(url) {
 }
 
 /**
+ * The identifying path of a LinkedIn URL, HOST-ANCHORED and reduced to the profile
+ * identity segment. Both "https://linkedin.com/in/foo" and
+ * "https://www.linkedin.com/in/foo/recent-activity/" yield "/in/foo". Returns '' for
+ * anything not actually hosted on linkedin.com — so a "linkedin.com/in/x" embedded in
+ * another host's URL (e.g. a tracking redirect) is rejected, not treated as a profile.
+ * Ignores scheme, www./country subdomain, sub-paths, query, hash, case, trailing slash,
+ * so two URLs for the SAME profile compare equal.
+ */
+function linkedInPath(url) {
+  let u = String(url || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u.replace(/^\/+/, '');
+  let host;
+  let path;
+  try {
+    const parsed = new URL(u);
+    host = parsed.hostname.toLowerCase();
+    path = parsed.pathname || '';
+  } catch {
+    return '';
+  }
+  if (host !== 'linkedin.com' && !host.endsWith('.linkedin.com')) return '';
+  // Profile identity segment only (ignore trailing sub-paths like /recent-activity).
+  const m = path.match(/^\/(in|company|school|pub)\/([^/]+)/i);
+  if (m) {
+    let slug = m[2];
+    try {
+      slug = decodeURIComponent(slug);
+    } catch {
+      /* keep raw slug */
+    }
+    return `/${m[1].toLowerCase()}/${slug.toLowerCase()}`;
+  }
+  return path.replace(/\/+$/, '').toLowerCase();
+}
+
+/**
+ * True only when both URLs point to the SAME LinkedIn profile (identical /in|/company
+ * path). The actor sometimes returns an UNRELATED fallback profile for a query it
+ * can't resolve; comparing the queried URL to the returned profileUrl catches that.
+ */
+function sameLinkedInProfile(a, b) {
+  const pa = linkedInPath(a);
+  const pb = linkedInPath(b);
+  return !!pa && pa === pb;
+}
+
+/** A "not found" profile entry — records the URL we tried, stores no profile data. */
+function notFoundProfile(queriedUrl) {
+  return {
+    sourceUrl: queriedUrl || null,
+    status: 'not_found',
+    fullName: null,
+    profileUrl: null,
+    headline: null,
+    location: null,
+    connectionsCount: null,
+    followerCount: null,
+  };
+}
+
+/**
  * Map a single Apify dataset item to one `linkedinInfo.profiles[]` entry.
  * The actor returns rows positionally aligned with the input queries; rows for
  * companies / failed lookups come back as all-null. `queriedUrl` is the URL we
  * asked for, preserved so we can join the row back to the right user/URL.
+ *
+ * A row is accepted as "found" ONLY when the returned profileUrl is the SAME
+ * profile we queried. The actor sometimes returns an unrelated fallback profile
+ * for an unresolvable query — those are treated as not found and NOT saved.
  */
 function mapItemToProfile(item, queriedUrl) {
-  const found = !!(item && item.profileUrl && item.fullName);
-  const loc = (item && item.location) || null;
+  const returnedUrl = item?.profileUrl || null;
+  const found =
+    !!(returnedUrl && item.fullName) && sameLinkedInProfile(queriedUrl, returnedUrl);
+
+  if (!found) return notFoundProfile(queriedUrl);
+
+  const loc = item.location || null;
   const parsed = (loc && loc.parsed) || {};
 
   return {
-    sourceUrl: queriedUrl || item?.profileUrl || null,
-    status: found ? 'found' : 'not_found',
-    fullName: item?.fullName || null,
-    profileUrl: item?.profileUrl || null,
-    headline: item?.headline || null,
+    sourceUrl: queriedUrl || returnedUrl,
+    status: 'found',
+    fullName: item.fullName || null,
+    profileUrl: returnedUrl,
+    headline: item.headline || null,
     location: loc
       ? {
           linkedinText: loc.linkedinText || null,
@@ -167,8 +237,8 @@ function mapItemToProfile(item, queriedUrl) {
           },
         }
       : null,
-    connectionsCount: typeof item?.connectionsCount === 'number' ? item.connectionsCount : null,
-    followerCount: typeof item?.followerCount === 'number' ? item.followerCount : null,
+    connectionsCount: typeof item.connectionsCount === 'number' ? item.connectionsCount : null,
+    followerCount: typeof item.followerCount === 'number' ? item.followerCount : null,
   };
 }
 
@@ -256,13 +326,16 @@ async function enrichLinkedInProfiles(urls, opts = {}) {
     lastToken = tokenDoc;
     raw.push(...items);
 
-    // Join results back to the queried URLs. Prefer the actor's profileUrl (it may
-    // be a canonicalized vanity URL), then fall back to positional alignment.
+    // Join results back to the queried URLs (positional within the chunk). Also key
+    // by the actor's canonical profileUrl — but ONLY for genuine matches, so a
+    // mismatched fallback profile can never overwrite another user's real match.
     items.forEach((item, idx) => {
-      const queriedUrl = chunk[idx]; // positional fallback within this chunk
+      const queriedUrl = chunk[idx];
       const info = mapItemToProfile(item, queriedUrl);
-      if (item?.profileUrl) byUrl.set(normalizeLinkedInUrl(item.profileUrl), info);
       if (queriedUrl) byUrl.set(normalizeLinkedInUrl(queriedUrl), info);
+      if (info.status === 'found' && item?.profileUrl) {
+        byUrl.set(normalizeLinkedInUrl(item.profileUrl), info);
+      }
     });
   }
 
@@ -298,6 +371,8 @@ module.exports = {
   isLinkedInUrl,
   allLinkedInUrls,
   toQueryUrl,
+  linkedInPath,
+  sameLinkedInProfile,
   mapItemToProfile,
   LINKEDIN_ACTOR_ID,
 };
