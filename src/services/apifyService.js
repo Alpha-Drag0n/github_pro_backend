@@ -20,6 +20,9 @@ const LINKEDIN_ACTOR_ID = process.env.APIFY_LINKEDIN_ACTOR_ID || 'MgJeZOsv2i4WkC
 const APIFY_BASE = 'https://api.apify.com/v2';
 // LinkedIn scraping is slow — allow generous time for a synchronous run.
 const RUN_TIMEOUT_MS = parseInt(process.env.APIFY_RUN_TIMEOUT_MS, 10) || 300000;
+// Max profile URLs per actor run. Free Apify accounts return at most 15 results
+// per run, so we never send more than this in one call (override for paid plans).
+const MAX_RESULTS_PER_RUN = parseInt(process.env.APIFY_MAX_RESULTS_PER_RUN, 10) || 15;
 
 /**
  * Verify an Apify token by calling /users/me.
@@ -170,26 +173,16 @@ function mapItemToProfile(item, queriedUrl) {
 }
 
 /**
- * Run the LinkedIn actor for a batch of profile URLs and return mapped results.
+ * Run the actor for ONE chunk of URLs (≤ MAX_RESULTS_PER_RUN) and return its rows.
  *
  * Uses ONE token at a time (the highest-priority active one). If that token fails
  * with a token-dead error (bad token / exhausted credits), it is DISABLED and the
- * same batch is retried on the next active token — i.e. tokens are consumed one by
+ * same chunk is retried on the next active token — i.e. tokens are consumed one by
  * one, not load-balanced. Transient errors (timeout, 5xx, rate limit) are NOT
  * blamed on the token and are surfaced to the caller without disabling it.
- *
- * @param {string[]} urls - LinkedIn profile URLs to enrich
- * @param {object}   [opts]
- * @param {string[]} [opts.countryFilter] - actor countryFilter input
- * @returns {Promise<{ tokenDoc, byUrl: Map<normUrl, linkedinInfo>, raw: object[] }>}
  */
-async function enrichLinkedInProfiles(urls, opts = {}) {
-  const cleanUrls = [...new Set((urls || []).map((u) => String(u || '').trim()).filter(Boolean))];
-  if (cleanUrls.length === 0) {
-    return { tokenDoc: null, byUrl: new Map(), raw: [] };
-  }
-
-  const input = { countryFilter: opts.countryFilter || [], queries: cleanUrls };
+async function runChunk(queries, opts) {
+  const input = { countryFilter: opts.countryFilter || [], queries };
   const triedIds = []; // DB token _ids disabled this run, skipped on the next select
   let triedEnv = false; // env fallback failed → don't reselect it
 
@@ -207,15 +200,17 @@ async function enrichLinkedInProfiles(urls, opts = {}) {
       throw err;
     }
 
-    let items;
     try {
       const res = await axios.post(
         `${APIFY_BASE}/acts/${LINKEDIN_ACTOR_ID}/run-sync-get-dataset-items`,
         input,
         { params: { token: tokenDoc.token }, timeout: RUN_TIMEOUT_MS }
       );
-      items = Array.isArray(res.data) ? res.data : [];
+      const items = Array.isArray(res.data) ? res.data : [];
       await recordTokenUsage(tokenDoc, { ok: true });
+      const enrichedCount = items.filter((i) => i && i.profileUrl && i.fullName).length;
+      await recordTokenUsage(tokenDoc, { profiles: enrichedCount, finalize: true });
+      return { tokenDoc, items };
     } catch (error) {
       if (isTokenFailure(error)) {
         // This token is dead — disable it and fall through to the next one.
@@ -229,22 +224,49 @@ async function enrichLinkedInProfiles(urls, opts = {}) {
       logger.error(`Apify LinkedIn enrichment failed (token "${tokenDoc.name || 'env'}"): ${error.message}`);
       throw error;
     }
+  }
+}
+
+/**
+ * Run the LinkedIn actor for a set of profile URLs and return mapped results.
+ *
+ * URLs are split into chunks of MAX_RESULTS_PER_RUN (15 on the free Apify plan) and
+ * run sequentially, so a single run never exceeds the plan's per-run result cap —
+ * regardless of how many URLs the caller passes (a user may have several). Each
+ * chunk applies the token-failover above; results are merged.
+ *
+ * @param {string[]} urls - LinkedIn profile URLs to enrich
+ * @param {object}   [opts]
+ * @param {string[]} [opts.countryFilter] - actor countryFilter input
+ * @returns {Promise<{ tokenDoc, byUrl: Map<normUrl, profile>, raw: object[] }>}
+ */
+async function enrichLinkedInProfiles(urls, opts = {}) {
+  const cleanUrls = [...new Set((urls || []).map((u) => String(u || '').trim()).filter(Boolean))];
+  if (cleanUrls.length === 0) {
+    return { tokenDoc: null, byUrl: new Map(), raw: [] };
+  }
+
+  const byUrl = new Map();
+  const raw = [];
+  let lastToken = null;
+
+  for (let i = 0; i < cleanUrls.length; i += MAX_RESULTS_PER_RUN) {
+    const chunk = cleanUrls.slice(i, i + MAX_RESULTS_PER_RUN);
+    const { tokenDoc, items } = await runChunk(chunk, opts);
+    lastToken = tokenDoc;
+    raw.push(...items);
 
     // Join results back to the queried URLs. Prefer the actor's profileUrl (it may
     // be a canonicalized vanity URL), then fall back to positional alignment.
-    const byUrl = new Map();
     items.forEach((item, idx) => {
-      const queriedUrl = cleanUrls[idx]; // positional fallback
+      const queriedUrl = chunk[idx]; // positional fallback within this chunk
       const info = mapItemToProfile(item, queriedUrl);
       if (item?.profileUrl) byUrl.set(normalizeLinkedInUrl(item.profileUrl), info);
       if (queriedUrl) byUrl.set(normalizeLinkedInUrl(queriedUrl), info);
     });
-
-    const enrichedCount = items.filter((i) => i && i.profileUrl && i.fullName).length;
-    await recordTokenUsage(tokenDoc, { profiles: enrichedCount, finalize: true });
-
-    return { tokenDoc, byUrl, raw: items };
   }
+
+  return { tokenDoc: lastToken, byUrl, raw };
 }
 
 /** Increment counters on the token document (no-op for env-only tokens). */

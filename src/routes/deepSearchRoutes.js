@@ -152,6 +152,10 @@ const HAS_USABLE_LINKEDIN_URL = {
 function buildDeepUserFilter(q) {
   const and = [{ 'searchIterationHistory.0': { $exists: true } }]; // deep-search users only
 
+  // Scope to ONE deep search (the DeepSearch _id; Mongoose casts the string).
+  // Lets the per-search "view" page reuse this whole filter/enrichment pipeline.
+  if (q.searchId) and.push({ 'searchIterationHistory.searchId': q.searchId });
+
   if (q.username) and.push({ username: { $regex: q.username, $options: 'i' } });
 
   // Location (profile field only).
@@ -356,7 +360,7 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
     //   default → drain UNPROCESSED users (have a URL, never enriched)
     //   retry   → re-process users already enriched but NOT found (not_found/error)
     if (filter && typeof filter === 'object') {
-      const batch = Math.min(MAX_LINKEDIN_BATCH, Math.max(1, parseInt(max, 10) || 25));
+      const batch = Math.min(MAX_LINKEDIN_BATCH, Math.max(1, parseInt(max, 10) || 15));
       const retry = req.body?.mode === 'retry';
       const q = { ...filter };
       delete q.linkedinInfoHas;
@@ -606,6 +610,52 @@ router.get('/deep-searches/:id/users', async (req, res) => {
   } catch (error) {
     logger.error(`Error fetching iterative search users: ${error.message}`);
     res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+/**
+ * Per-search overview metrics for the detail "view" page — a quick "shape of this
+ * search's haul": coverage of email/LinkedIn, enrichment progress, and top locations.
+ * GET /api/deep-searches/:id/overview
+ */
+router.get('/deep-searches/:id/overview', async (req, res) => {
+  try {
+    const search = await DeepSearch.findOne({
+      $or: [{ _id: req.params.id }, { searchId: req.params.id }],
+    });
+    if (!search) return res.status(404).json({ error: 'Search not found' });
+
+    const scoped = { 'searchIterationHistory.searchId': search._id };
+    const withCond = (cond) => User.countDocuments({ $and: [scoped, cond] });
+
+    const [total, withEmail, withLinkedin, withLinkedinUrl, enriched, found, topLocAgg] =
+      await Promise.all([
+        User.countDocuments(scoped),
+        withCond(PRESENCE_FIELDS.email),
+        withCond(PRESENCE_FIELDS.linkedin),
+        withCond(HAS_USABLE_LINKEDIN_URL),
+        withCond(HAS_LINKEDIN_INFO),
+        withCond(HAS_LINKEDIN_INFO_FOUND),
+        User.aggregate([
+          { $match: { 'searchIterationHistory.searchId': search._id, location: { $nin: [null, ''] } } },
+          { $group: { _id: '$location', count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+          { $limit: 6 },
+        ]),
+      ]);
+
+    res.json({
+      total,
+      withEmail,
+      withLinkedin,
+      withLinkedinUrl,
+      enriched,
+      found,
+      topLocations: topLocAgg.map((l) => ({ location: l._id, count: l.count })),
+    });
+  } catch (error) {
+    logger.error(`Error computing search overview: ${error.message}`);
+    res.status(500).json({ error: 'Failed to compute overview' });
   }
 });
 
