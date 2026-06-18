@@ -8,6 +8,7 @@ const Logger = require('../utils/logger');
 const { stopSelfKeepAlive } = require('./keepAlive');
 const { recordHealthCheck } = require('./healthLogService');
 const Database = require('../utils/database');
+const tracing = require('./observability/tracing');
 const { SHUTDOWN_MESSAGE } = require('./searchRecovery');
 const {
   setShuttingDown,
@@ -74,6 +75,9 @@ async function runShutdown(server, getAgents) {
   }
 
   await pauseActiveSearchesInDatabase();
+
+  // Flush any buffered trace spans before the process exits.
+  await tracing.shutdown().catch(() => {});
 
   return new Promise((resolve) => {
     let settled = false;

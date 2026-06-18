@@ -10,6 +10,7 @@
 
 const ContactPatternExtractor = require('./contactPatternExtractor');
 const locationExtractor = require('./locationExtractor');
+const tracing = require('./observability/tracing');
 const Logger = require('../utils/logger');
 
 const logger = new Logger();
@@ -138,7 +139,12 @@ async function discoverContacts(client, username, opts = {}) {
 
   // Location from the SAME already-fetched text (no extra API calls): profile location +
   // anything self-reported in repo READMEs/descriptions, with source URLs + confidence.
-  const locationInfo = locationExtractor.buildLocationInfo(sources, profile?.location);
+  // Timed as a location.extract span (the user's "finding out location" step).
+  const locationInfo = await tracing.withSpan(
+    'location.extract', 'compute',
+    () => locationExtractor.buildLocationInfo(sources, profile?.location),
+    (li) => ({ profileLocation: profile?.location || null, discovered: li && li.discovered ? li.discovered.length : 0 })
+  );
 
   logger.info(
     `${prefix} ${username} TOTAL → emails=${summary.emails} phone=${summary.phone} ` +

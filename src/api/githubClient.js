@@ -6,11 +6,17 @@
 const axios = require('axios');
 const Logger = require('../utils/logger');
 const requestLogService = require('../services/requestLogService');
+const tracing = require('../services/observability/tracing');
 
 const BASE_URL = 'https://api.github.com';
 
 class GitHubClient {
-  constructor(token, searchId = null) {
+  /**
+   * @param {string} token   GitHub PAT
+   * @param {string} [searchId]  searchId (string) for request logging correlation
+   * @param {object} [meta]   { tokenId } — used to attribute tracing spans to a token
+   */
+  constructor(token, searchId = null, meta = {}) {
     if (!token) {
       throw new Error('GitHub token is required. Set GITHUB_TOKEN in .env file');
     }
@@ -23,6 +29,8 @@ class GitHubClient {
         Accept: 'application/vnd.github.v3+json',
       },
     });
+    // One interceptor → a github.* span for EVERY method on this client.
+    tracing.instrumentGithubAxios(this.client, { tokenId: meta.tokenId || null });
     this.logger = new Logger();
   }
 
