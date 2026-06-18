@@ -899,9 +899,8 @@ router.post('/deep-searches/:id/resume', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    // Any not-completed search can be resumed (failed, paused, pending, or a stuck
-    // in_progress left over from a restart). The launch guard below rejects a search
-    // that is genuinely still running in this process.
+    // Any not-completed search can be resumed (paused, failed, pending, or a stuck
+    // in_progress left over from a restart). Completed searches are rejected below.
     if (search.status === 'completed') {
       return res.status(400).json({
         error: 'Cannot resume search',
@@ -923,7 +922,7 @@ router.post('/deep-searches/:id/resume', async (req, res) => {
       await taskQueue.generateTasksForSearch(search);
     } else {
       await taskQueue.resumeSearch(search._id);
-      await DeepSearch.updateOne({ _id: search._id }, { $set: { resumedAt: new Date(), error: null } });
+      await DeepSearch.updateOne({ _id: search._id }, { $set: { resumedAt: new Date(), error: null, pausedAt: null } });
     }
 
     logger.info(`Deep search resumed: ${search.searchId}`);

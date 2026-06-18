@@ -323,14 +323,42 @@ async function rollupSearch(searchId) {
 
 async function pauseSearch(searchId) {
   await DeepSearch.updateOne({ _id: searchId }, { $set: { 'control.desired': 'paused', status: 'paused' } });
-  const r = await Task.updateMany({ searchId, status: 'pending' }, { $set: { status: 'held' } });
-  await events.emit({ type: 'control.pause', searchId, message: `paused; ${r.modifiedCount} tasks held` });
-  return r.modifiedCount;
+  // Hold queued work so agents stop claiming it.
+  const held = await Task.updateMany({ searchId, status: 'pending' }, { $set: { status: 'held' } });
+  // Stop any in-flight (leased) task instead of letting the current bucket run to completion:
+  //  - bump leaseEpoch  → the running agent's next renewLease fails, so it aborts (and its
+  //    own releaseTask no-ops on the stale epoch, so it can't override us);
+  //  - leaseUntil = epoch(0) (a PAST date, not null, so the reaper's `{ $lt: now }` matches)
+  //    → the reaper reclaims it as 'held' (parent desired === 'paused') within a tick;
+  //  - attempts-1 (clamped ≥0) → pausing is not a failed attempt, so it doesn't eat the
+  //    retry budget across pause/resume cycles.
+  const fenced = await Task.updateMany({ searchId, status: 'leased' }, [
+    {
+      $set: {
+        leaseEpoch: { $add: ['$leaseEpoch', 1] },
+        leaseUntil: new Date(0),
+        attempts: { $max: [{ $subtract: ['$attempts', 1] }, 0] },
+      },
+    },
+  ]);
+  await events.emit({
+    type: 'control.pause',
+    searchId,
+    message: `paused; ${held.modifiedCount} held, ${fenced.modifiedCount} in-flight fenced`,
+  });
+  return held.modifiedCount + fenced.modifiedCount;
 }
 
 async function resumeSearch(searchId) {
   await DeepSearch.updateOne({ _id: searchId }, { $set: { 'control.desired': 'run', status: 'in_progress' } });
-  const r = await Task.updateMany({ searchId, status: 'held' }, { $set: { status: 'pending' } });
+  // Release queued work back to agents. 'failed' is included defensively — the agent path
+  // normally produces only pending/dead, but a retryable failure must never be stranded.
+  // Actively-leased tasks are left alone: any with an expired lease are reclaimed to 'pending'
+  // by the reaper/claimTask (desired === 'run' now); 'canceled'/'dead' stay terminal.
+  const r = await Task.updateMany(
+    { searchId, status: { $in: ['held', 'failed'] } },
+    { $set: { status: 'pending', leasedBy: null, leaseUntil: null } }
+  );
   await events.emit({ type: 'control.resume', searchId, message: `resumed; ${r.modifiedCount} tasks released` });
   return r.modifiedCount;
 }

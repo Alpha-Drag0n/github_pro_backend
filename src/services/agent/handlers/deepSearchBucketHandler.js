@@ -18,13 +18,15 @@ const User = require('../../../models/userModel');
 const GitHubClient = require('../../../api/githubClient');
 const contactDiscoveryService = require('../../contactDiscoveryService');
 const tokenRateLimiter = require('../tokenRateLimiter');
-const { rotationPlan } = require('../agentConfig');
 const Logger = require('../../../utils/logger');
 
 const logger = new Logger();
 const BASE_URL = 'https://api.github.com';
 const GITHUB_SEARCH_CAP = 1000;
 const PROFILE_FETCH_DELAY_MS = 120;
+// Log which token each agent picks to the CONSOLE only (never persisted). Set
+// LOG_TOKEN_SELECTION=false to silence it.
+const LOG_TOKEN_SELECTION = process.env.LOG_TOKEN_SELECTION !== 'false';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,12 +46,17 @@ const MAX_CAPACITY_WAIT_MS = 4 * 60_000; // don't squat a lease forever when all
  * case it flags ctx.capacityAborted so the handler releases the task for a later retry
  * instead of holding the lease for the full per-task watchdog window.
  */
-async function acquireOrWait(resource, ctx) {
+async function acquireOrWait(resource, ctx, excludeIds = []) {
   const deadline = Date.now() + MAX_CAPACITY_WAIT_MS;
   for (;;) {
     if (await ctx.shouldAbort()) return null;
-    const tok = await tokenRateLimiter.acquire(resource);
-    if (tok) return tok;
+    const tok = await tokenRateLimiter.acquire(resource, excludeIds);
+    if (tok) {
+      if (LOG_TOKEN_SELECTION) {
+        console.log(`[token] agent ${ctx.agentId || '?'} → "${tok.name}" (${resource})`);
+      }
+      return tok;
+    }
     if (Date.now() >= deadline) {
       ctx.capacityAborted = true; // no token capacity for too long → give up this task
       return null;
@@ -70,12 +77,12 @@ async function paginatedSearch(query, ctx) {
   const results = [];
   const perPage = 100;
   const maxPages = GITHUB_SEARCH_CAP / perPage;
-  const { maxRotations, perToken } = rotationPlan(ctx.tokenCount);
-  let rotations = 0;
-  const failsByToken = new Map(); // token._id → consecutive failures (cool + rotate at perToken)
+  const tokenCount = Math.max(1, ctx.tokenCount || 1);
+  let tried = []; // DISTINCT-token rotation for the CURRENT page; reset once a page succeeds
 
   for (let page = 1; page <= maxPages; page++) {
-    let token = await acquireOrWait('search', ctx);
+    // Never re-pick a token that already failed this page → t1..tN are all different.
+    const token = await acquireOrWait('search', ctx, tried);
     if (!token) return { results, aborted: true };
 
     try {
@@ -89,7 +96,7 @@ async function paginatedSearch(query, ctx) {
       await tokenRateLimiter.reconcile(token._id, 'search', res.headers);
       await tokenRateLimiter.reportSuccess(token._id);
       ctx.requests++;
-      failsByToken.delete(token._id); // recovered → reset its failure streak
+      tried = []; // page ok → any token may serve the next page
 
       const items = res.data.items || [];
       results.push(...items);
@@ -103,29 +110,24 @@ async function paginatedSearch(query, ctx) {
       const kind = classifyTokenError(status);
       if (!kind) throw Object.assign(error, { code: `HTTP_${status || 'NETWORK'}` });
 
-      rotations++;
-      if (rotations > maxRotations) {
-        throw Object.assign(new Error(`search failed after ${rotations - 1} rotations`), { code: 'RATE_LIMIT' });
+      // Cool this token and exclude it for the rest of this page (rotate to a DISTINCT token).
+      const retryAfter = parseInt(error.response?.headers?.['retry-after'], 10);
+      await tokenRateLimiter.reportError(token._id, kind, retryAfter ? retryAfter * 1000 : 0);
+      tried.push(token._id);
+      if (tried.length >= tokenCount) {
+        // Tried every token once → give up this bucket (task retries later).
+        throw Object.assign(new Error(`search failed after trying ${tried.length} token(s)`), { code: 'RATE_LIMIT' });
       }
-      // Give a token `perToken` attempts before cooling it (the 1st failure may be transient);
-      // only then report the error so the limiter rotates it out.
-      const fails = (failsByToken.get(token._id) || 0) + 1;
-      failsByToken.set(token._id, fails);
-      if (fails >= perToken) {
-        const retryAfter = parseInt(error.response?.headers?.['retry-after'], 10);
-        await tokenRateLimiter.reportError(token._id, kind, retryAfter ? retryAfter * 1000 : 0);
-        failsByToken.delete(token._id);
-      }
-      page--; // retry the same page (same token if still warm, else the next one)
+      page--; // retry the same page with a different (not-yet-tried) token
       continue;
     }
   }
   return { results, aborted: false };
 }
 
-/** Build a core-API GitHubClient backed by the rate limiter, with a rotate() callback. */
-async function makeCoreClient(ctx) {
-  const token = await acquireOrWait('core', ctx);
+/** Build a core-API GitHubClient backed by the rate limiter. excludeIds → distinct rotation. */
+async function makeCoreClient(ctx, excludeIds = []) {
+  const token = await acquireOrWait('core', ctx, excludeIds);
   if (!token) return null;
   return {
     client: new GitHubClient(token.token, ctx.searchUuid),
@@ -176,11 +178,10 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
         updated_at: existing.github_updated_at,
       };
     } else {
+      const tokenCount = Math.max(1, ctx.tokenCount || 1);
+      const tried = []; // token ids already tried → never re-selected (distinct rotation)
       core = await makeCoreClient(ctx);
       if (!core) break; // capacity/abort while waiting for a token
-      const { maxRotations, perToken } = rotationPlan(ctx.tokenCount);
-      let rotations = 0;
-      const failsByToken = new Map(); // token._id → consecutive failures (cool + rotate at perToken)
       let skip = false;
       for (;;) {
         try {
@@ -201,23 +202,18 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
             skip = true;
             break;
           }
-          rotations += 1;
-          if (rotations > maxRotations) {
-            logger.warn(`[bucket] profile fetch for ${username} gave up after ${rotations - 1} retries`);
+          // Cool this token and never pick it again this cycle → rotate to a DISTINCT token.
+          const ra = parseInt(e.response?.headers?.['retry-after'], 10);
+          await tokenRateLimiter.reportError(core.tokenId, kind, ra ? ra * 1000 : 0);
+          tried.push(core.tokenId);
+          if (tried.length >= tokenCount) {
+            // Tried every token once → give up on this user.
+            logger.warn(`[bucket] profile fetch for ${username} gave up after ${tried.length} token(s)`);
             skip = true;
             break;
           }
-          // Give a token `perToken` attempts before cooling it (the 1st failure may be
-          // transient); only then report the error so the limiter rotates it out.
-          const fails = (failsByToken.get(core.tokenId) || 0) + 1;
-          failsByToken.set(core.tokenId, fails);
-          if (fails >= perToken) {
-            const ra = parseInt(e.response?.headers?.['retry-after'], 10);
-            await tokenRateLimiter.reportError(core.tokenId, kind, ra ? ra * 1000 : 0);
-            failsByToken.delete(core.tokenId);
-          }
-          core = await makeCoreClient(ctx); // re-acquire: same token if still warm, else the next
-          if (!core) { skip = true; break; } // capacity/abort
+          core = await makeCoreClient(ctx, tried); // a token NOT yet tried this cycle
+          if (!core) { skip = true; break; } // no other token available / abort
           continue;
         }
       }
