@@ -324,10 +324,11 @@ async function run(payload, ctx) {
   const excluded = new Set();
   const maxIterations = 50;
   let usersNew = 0;
+  let usersFound = 0; // total results discovered across iterations (vs usersNew = saved)
 
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     if ((await ctx.shouldAbort()) || ctx.capacityAborted) {
-      return { usersNew, requests: ctx.requests, aborted: true };
+      return { usersNew, usersFound, requests: ctx.requests, aborted: true };
     }
     await ctx.renew();
 
@@ -335,12 +336,13 @@ async function run(payload, ctx) {
     for (const loc of excluded) query += ` -location:"${loc}"`;
 
     const { results, aborted } = await paginatedSearch(query, ctx);
-    if (aborted) return { usersNew, requests: ctx.requests, aborted: true };
+    if (aborted) return { usersNew, usersFound, requests: ctx.requests, aborted: true };
     if (results.length === 0) break;
+    usersFound += results.length;
 
     const { created, locations } = await saveUsers(results, ctx, iteration, Array.from(excluded));
     usersNew += created;
-    if (ctx.capacityAborted) return { usersNew, requests: ctx.requests, aborted: true };
+    if (ctx.capacityAborted) return { usersNew, usersFound, requests: ctx.requests, aborted: true };
 
     const fresh = locations.filter((l) => !excluded.has(l));
     fresh.forEach((l) => excluded.add(l));
@@ -349,7 +351,7 @@ async function run(payload, ctx) {
     if (fresh.length === 0) break;
   }
 
-  return { usersNew, requests: ctx.requests };
+  return { usersNew, usersFound, requests: ctx.requests };
 }
 
 module.exports = { type: 'deep-search-bucket', run };

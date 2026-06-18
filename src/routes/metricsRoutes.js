@@ -167,7 +167,7 @@ router.get('/metrics/traces', wrap(async (req, res) => {
     startTs: new Date(r.startTs).getTime(),
     term: r.attr && r.attr.term,
     day: r.attr && r.attr.day,
-    usersFound: (r.attr && r.attr.usersNew) || 0,
+    usersFound: (r.attr && (r.attr.usersFound != null ? r.attr.usersFound : r.attr.usersNew)) || 0,
     usersSaved: (r.attr && r.attr.usersNew) || 0,
     contacts: 0,
     tokenName: r.tokenId ? String(r.tokenId) : '—',
@@ -246,7 +246,7 @@ router.get('/metrics/agents', wrap(async (req, res) => {
     (segByAgent[s.agentId] = segByAgent[s.agentId] || []).push({
       start: new Date(s.startTs).getTime(),
       end: new Date(s.endTs || s.startTs).getTime(),
-      status: s.status === 'error' ? 'paused' : 'busy',
+      status: s.status === 'error' ? 'paused' : s.status === 'aborted' ? 'aborted' : 'busy',
     });
   }
   const now = Date.now();

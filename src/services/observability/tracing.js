@@ -50,6 +50,7 @@ const spanModel = () => (Span || (Span = require('../../models/spanModel')));
 let buffer = [];
 let flushTimer = null;
 let flushing = false;
+let bufferCapWarned = false;
 
 function startFlushTimer() {
   if (flushTimer || !ENABLED) return;
@@ -64,10 +65,17 @@ async function flush() {
   buffer = [];
   try {
     await spanModel().insertMany(batch, { ordered: false });
+    bufferCapWarned = false; // recovered
   } catch (e) {
-    logger.warn(`[tracing] span flush failed (${batch.length} dropped): ${e.message}`);
     // Bounded re-buffer: never grow without limit, even in a Mongo outage.
-    if (buffer.length < BATCH * 5) buffer = batch.slice(-BATCH).concat(buffer);
+    if (buffer.length < BATCH * 5) {
+      buffer = batch.slice(-BATCH).concat(buffer);
+      logger.warn(`[tracing] span flush failed (${batch.length} re-buffered): ${e.message}`);
+    } else if (!bufferCapWarned) {
+      // High-water mark: make prolonged span loss visible (once, until recovery).
+      bufferCapWarned = true;
+      logger.error(`[tracing] span buffer at cap (${buffer.length}); dropping spans until Mongo recovers: ${e.message}`);
+    }
   } finally {
     flushing = false;
   }
@@ -298,12 +306,20 @@ function collectionOf(ctx) {
   );
 }
 
+let collectionResolveWarned = false;
 function recordDbSpan(ctx, start, err, result, forcedOp) {
   if (!DB_ENABLED || !start) return;
   const store = als.getStore();
   if (!store) return; // only DB ops INSIDE a trace are recorded (skips heartbeats/rollups)
   const collection = collectionOf(ctx);
-  if (!collection || EXCLUDE_COLLECTIONS.has(collection)) return;
+  if (!collection) {
+    if (!collectionResolveWarned) {
+      collectionResolveWarned = true;
+      logger.warn('[tracing] could not resolve a collection name for a DB op — some db spans may be missing');
+    }
+    return;
+  }
+  if (EXCLUDE_COLLECTIONS.has(collection)) return;
   const op = forcedOp || ctx.op || 'aggregate';
   let docCount;
   if (Array.isArray(result)) docCount = result.length;

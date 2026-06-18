@@ -161,6 +161,7 @@ async function startAgent(opts = {}) {
             day: task.payload && task.payload.day,
             term: task.payload && task.payload.term,
             usersNew: r && r.usersNew,
+            usersFound: r && r.usersFound,
             requests: r && r.requests,
           }),
         },
