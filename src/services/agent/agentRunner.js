@@ -14,6 +14,7 @@ const DeepSearch = require('../../models/deepSearchModel');
 const agentRegistry = require('./agentRegistry');
 const taskQueue = require('./taskQueue');
 const deepSearchBucketHandler = require('./handlers/deepSearchBucketHandler');
+const tracing = require('../observability/tracing');
 const { HEARTBEAT_MS, CLAIM_IDLE_BACKOFF_MS, MAX_TASK_MS } = require('./agentConfig');
 
 const logger = new Logger();
@@ -144,7 +145,27 @@ async function startAgent(opts = {}) {
     }, MAX_TASK_MS);
 
     try {
-      const result = await handler.run(task.payload, ctx);
+      // Root of the trace: traceId = `${taskId}:${leaseEpoch}` (one trace per attempt).
+      // Every github/db/compute/token span emitted by the handler nests under this.
+      const result = await tracing.withTrace(
+        {
+          traceId: `${task._id}:${task.leaseEpoch}`,
+          taskId: task._id,
+          agentId,
+          searchId: task.searchId,
+          attempt: task.leaseEpoch,
+          name: 'task.bucket',
+          kind: 'task',
+          attr: (r) => ({
+            type: task.type,
+            day: task.payload && task.payload.day,
+            term: task.payload && task.payload.term,
+            usersNew: r && r.usersNew,
+            requests: r && r.requests,
+          }),
+        },
+        () => handler.run(task.payload, ctx)
+      );
       clearTimeout(watchdog);
 
       if (result?.aborted || leaseLost) {

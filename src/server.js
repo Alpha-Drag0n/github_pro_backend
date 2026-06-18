@@ -5,6 +5,10 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
+// Require tracing FIRST so its global mongoose plugin is installed before any
+// model is compiled (models loaded earlier would miss DB span capture).
+require('./services/observability/tracing');
+
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -24,6 +28,7 @@ const miningRoutes = require('./routes/miningRoutes');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const agentRoutes = require('./routes/agentRoutes');
+const metricsRoutes = require('./routes/metricsRoutes');
 const healthRoutes = require('./routes/healthRoutes');
 const { startManager } = require('./services/agent/managerService');
 const { startAgent } = require('./services/agent/agentRunner');
@@ -86,6 +91,7 @@ app.use('/api', authenticate, quickSearchRoutes);
 app.use('/api', authenticate, userLookupRoutes);
 app.use('/api', authenticate, deepSearchRoutes);
 app.use('/api', authenticate, agentRoutes);
+app.use('/api', authenticate, metricsRoutes);
 app.use('/api/mining', authenticate, miningRoutes);
 
 // API error handler for unmatched API routes

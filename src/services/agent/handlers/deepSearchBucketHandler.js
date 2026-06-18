@@ -18,6 +18,7 @@ const User = require('../../../models/userModel');
 const GitHubClient = require('../../../api/githubClient');
 const contactDiscoveryService = require('../../contactDiscoveryService');
 const tokenRateLimiter = require('../tokenRateLimiter');
+const tracing = require('../../observability/tracing');
 const Logger = require('../../../utils/logger');
 
 const logger = new Logger();
@@ -48,6 +49,8 @@ const MAX_CAPACITY_WAIT_MS = 4 * 60_000; // don't squat a lease forever when all
  */
 async function acquireOrWait(resource, ctx, excludeIds = []) {
   const deadline = Date.now() + MAX_CAPACITY_WAIT_MS;
+  const waitStart = Date.now(); // capture the (previously invisible) token-wait latency
+  let waited = false;
   for (;;) {
     if (await ctx.shouldAbort()) return null;
     const tok = await tokenRateLimiter.acquire(resource, excludeIds);
@@ -55,12 +58,25 @@ async function acquireOrWait(resource, ctx, excludeIds = []) {
       if (LOG_TOKEN_SELECTION) {
         console.log(`[token] agent ${ctx.agentId || '?'} → "${tok.name}" (${resource})`);
       }
+      // Only record when we actually had to wait — keeps the trace clean.
+      if (waited) {
+        tracing.recordLeaf({
+          name: 'token.wait', kind: 'token', start: waitStart, end: Date.now(),
+          status: 'ok', tokenId: tok._id,
+          attr: { resource, waitedMs: Date.now() - waitStart, acquiredToken: tok.name },
+        });
+      }
       return tok;
     }
     if (Date.now() >= deadline) {
       ctx.capacityAborted = true; // no token capacity for too long → give up this task
+      tracing.recordLeaf({
+        name: 'token.wait', kind: 'token', start: waitStart, end: Date.now(),
+        status: 'aborted', attr: { resource, waitedMs: Date.now() - waitStart, reason: 'capacity_timeout' },
+      });
       return null;
     }
+    waited = true;
     await sleep(2_000 + Math.floor(Math.random() * 1000)); // every token cooling → wait (C2) + jitter
   }
 }
@@ -84,13 +100,25 @@ async function paginatedSearch(query, ctx) {
     // Never re-pick a token that already failed this page → t1..tN are all different.
     const token = await acquireOrWait('search', ctx, tried);
     if (!token) return { results, aborted: true };
+    tracing.setToken(token._id, token.name); // attribute subsequent spans to this token
 
     try {
-      const res = await axios.get(`${BASE_URL}/search/users`, {
-        headers: headers(token.token),
-        params: { q: query, per_page: perPage, page, sort: 'joined', order: 'desc' },
-        timeout: 15_000,
-      });
+      // This raw axios.get bypasses GitHubClient's interceptor, so wrap it explicitly
+      // → a github.search span per page (the deep-search hot path).
+      const res = await tracing.withSpan(
+        'github.search', 'github',
+        () => axios.get(`${BASE_URL}/search/users`, {
+          headers: headers(token.token),
+          params: { q: query, per_page: perPage, page, sort: 'joined', order: 'desc' },
+          timeout: 15_000,
+        }),
+        (r) => ({
+          method: 'GET', endpoint: '/search/users', page,
+          statusCode: r && r.status,
+          rateRemaining: r && r.headers ? Number(r.headers['x-ratelimit-remaining']) : undefined,
+          resultCount: r && r.data && Array.isArray(r.data.items) ? r.data.items.length : undefined,
+        })
+      );
       // Await reconcile so it serializes BEFORE the next page's acquire() decrement
       // (otherwise a late reconcile could clobber the new decrement).
       await tokenRateLimiter.reconcile(token._id, 'search', res.headers);
@@ -129,8 +157,9 @@ async function paginatedSearch(query, ctx) {
 async function makeCoreClient(ctx, excludeIds = []) {
   const token = await acquireOrWait('core', ctx, excludeIds);
   if (!token) return null;
+  tracing.setToken(token._id, token.name);
   return {
-    client: new GitHubClient(token.token, ctx.searchUuid),
+    client: new GitHubClient(token.token, ctx.searchUuid, { tokenId: token._id }),
     tokenId: token._id,
   };
 }
@@ -228,14 +257,18 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
     try {
       if (!core) core = await makeCoreClient(ctx);
       if (core) {
-        const discovery = await contactDiscoveryService.discoverContacts(core.client, username, {
-          profile,
-          tag: ctx.searchUuid,
-          rotate: async () => {
-            const next = await makeCoreClient(ctx);
-            return next ? next.client : null;
-          },
-        });
+        const discovery = await tracing.withSpan(
+          'contact.discover', 'compute',
+          () => contactDiscoveryService.discoverContacts(core.client, username, {
+            profile,
+            tag: ctx.searchUuid,
+            rotate: async () => {
+              const next = await makeCoreClient(ctx);
+              return next ? next.client : null;
+            },
+          }),
+          (d) => ({ username, repositoriesChecked: d && d.repositoriesChecked, foundContact: !!(d && d.contactInfo) })
+        );
         contactInfo = discovery.contactInfo;
         socialProfiles = discovery.socialProfiles;
         locationInfo = discovery.locationInfo;
