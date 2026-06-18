@@ -114,7 +114,7 @@ router.delete('/tokens/:id', async (req, res) => {
  */
 router.patch('/tokens/:id', async (req, res) => {
   try {
-    const { email, priority, isActive, status } = req.body;
+    const { email, priority, isActive, status, disabled } = req.body;
     const token = await Token.findById(req.params.id);
 
     if (!token) {
@@ -123,8 +123,19 @@ router.patch('/tokens/:id', async (req, res) => {
 
     if (email !== undefined) token.email = email;
     if (priority !== undefined) token.priority = priority;
-    if (isActive !== undefined) token.isActive = isActive;
     if (status !== undefined) token.status = status;
+    if (disabled !== undefined) token.disabled = disabled;
+    if (isActive !== undefined) {
+      token.isActive = isActive;
+      if (isActive) {
+        // Re-enabling also lifts an auto-quarantine (401 → disabled) and any active cooldown,
+        // and resets the error streak — so the token actually re-enters the agent rotation.
+        token.disabled = false;
+        token.cooldownUntil = null;
+        token.consecutiveErrors = 0;
+        token.failureReason = null;
+      }
+    }
 
     await token.save();
     res.json({
@@ -134,6 +145,7 @@ router.patch('/tokens/:id', async (req, res) => {
       priority: token.priority,
       status: token.status,
       isActive: token.isActive,
+      disabled: token.disabled,
     });
   } catch (error) {
     logger.error(`Error updating token: ${error.message}`);
