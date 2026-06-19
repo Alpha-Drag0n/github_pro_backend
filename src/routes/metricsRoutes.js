@@ -34,17 +34,27 @@ const RANGES = {
   '24h': { ms: 24 * 60 * 60_000, buckets: 24 },
 };
 const SPAN_FETCH_CAP = 100_000;
+const DAY_MS = 24 * 60 * 60_000;
 
-function rangeOf(key) {
-  const r = RANGES[key] || RANGES['1h'];
+// Accepts the request query: either { range:'1h' } (relative-to-now preset) or
+// { from, to } (absolute epoch-ms window). Returns a normalized window.
+function rangeOf(q = {}) {
   const now = Date.now();
-  const since = now - r.ms;
-  const stepMs = r.ms / r.buckets;
-  return { ...r, key: RANGES[key] ? key : '1h', now, since, stepMs };
+  const from = q.from != null && q.from !== '' ? Number(q.from) : null;
+  const to = q.to != null && q.to !== '' ? Number(q.to) : null;
+  if (from && to && to > from) {
+    const ms = to - from;
+    const buckets = Math.max(8, Math.min(60, 30)); // fixed bucket target for custom windows
+    return { key: 'custom', custom: true, ms, buckets, now, since: from, until: to, stepMs: ms / buckets };
+  }
+  const r = RANGES[q.range] || RANGES['1h'];
+  return { ...r, key: RANGES[q.range] ? q.range : '1h', custom: false, now, since: now - r.ms, until: now, stepMs: r.ms / r.buckets };
 }
-function clock(ts) {
+function pad(n) { return String(n).padStart(2, '0'); }
+function clock(ts, longWindow = false) {
   const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return longWindow ? `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${hm}` : hm;
 }
 function emptyBuckets(n, v = 0) {
   return Array.from({ length: n }, () => v);
@@ -61,16 +71,18 @@ function percentile(sorted, p) {
 
 /* ---------------- overview ---------------- */
 router.get('/metrics/overview', wrap(async (req, res) => {
-  const R = rangeOf(req.query.range);
-  const { since, stepMs, buckets } = R;
-  const labels = Array.from({ length: buckets }, (_, b) => clock(since + b * stepMs + stepMs / 2));
+  const R = rangeOf(req.query);
+  const { since, until, stepMs, buckets } = R;
+  const longWindow = (until - since) > DAY_MS;
+  const labels = Array.from({ length: buckets }, (_, b) => clock(since + b * stepMs + stepMs / 2, longWindow));
+  const tsFilter = { $gte: new Date(since), $lte: new Date(until) };
 
   const [githubSpans, tokenSpans, taskSpans, taskCounts] = await Promise.all([
-    Span.find({ kind: 'github', startTs: { $gte: new Date(since) } })
+    Span.find({ kind: 'github', startTs: tsFilter })
       .select('startTs durationMs status attr.statusCode').limit(SPAN_FETCH_CAP).lean(),
-    Span.find({ kind: 'token', startTs: { $gte: new Date(since) } })
+    Span.find({ kind: 'token', startTs: tsFilter })
       .select('startTs durationMs').limit(SPAN_FETCH_CAP).lean(),
-    Span.find({ kind: 'task', startTs: { $gte: new Date(since) } })
+    Span.find({ kind: 'task', startTs: tsFilter })
       .select('startTs status').limit(SPAN_FETCH_CAP).lean(),
     Task.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
   ]);
@@ -136,12 +148,33 @@ router.get('/metrics/overview', wrap(async (req, res) => {
   });
 }));
 
-/* ---------------- traces ---------------- */
+/* ---------------- traces (paginated) ---------------- */
 router.get('/metrics/traces', wrap(async (req, res) => {
-  const R = rangeOf(req.query.range);
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
-  const roots = await Span.find({ kind: 'task', startTs: { $gte: new Date(R.since) } })
-    .sort({ startTs: -1 }).limit(limit).lean();
+  const R = rangeOf(req.query);
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const taskFilter = { kind: 'task', startTs: { $gte: new Date(R.since), $lte: new Date(R.until) } };
+  if (req.query.agentId) taskFilter.agentId = req.query.agentId; // per-agent timeline
+
+  // Server-side aggregation for wide windows: return per-bucket outcome counts
+  // (count/ok/error/aborted) instead of thousands of raw rows.
+  if (req.query.agg) {
+    const nb = Math.max(8, Math.min(200, parseInt(req.query.buckets, 10) || 80));
+    const stepMs = (R.until - R.since) / nb;
+    const spans = await Span.find(taskFilter).select('startTs status').limit(SPAN_FETCH_CAP).lean();
+    const buckets = Array.from({ length: nb }, (_, b) => ({ t: R.since + b * stepMs, count: 0, ok: 0, error: 0, aborted: 0 }));
+    for (const s of spans) {
+      const b = Math.max(0, Math.min(nb - 1, Math.floor((new Date(s.startTs).getTime() - R.since) / stepMs)));
+      buckets[b].count += 1;
+      buckets[b][s.status === 'ok' ? 'ok' : s.status === 'error' ? 'error' : 'aborted'] += 1;
+    }
+    return res.json({ agg: true, total: spans.length, buckets });
+  }
+
+  const total = await Span.countDocuments(taskFilter);
+  const pages = Math.max(1, Math.ceil(total / limit));
+  const roots = await Span.find(taskFilter)
+    .sort({ startTs: -1 }).skip((page - 1) * limit).limit(limit).lean();
   const ids = roots.map((r) => r.traceId);
   const agg = ids.length
     ? await Span.aggregate([
@@ -156,26 +189,31 @@ router.get('/metrics/traces', wrap(async (req, res) => {
       ])
     : [];
   const m = Object.fromEntries(agg.map((a) => [a._id, a]));
-  res.json(roots.map((r) => ({
-    traceId: r.traceId,
-    taskId: r.taskId,
-    agentId: r.agentId,
-    searchId: r.searchId,
-    attempt: r.attempt,
-    status: r.status,
-    durationMs: r.durationMs,
-    startTs: new Date(r.startTs).getTime(),
-    term: r.attr && r.attr.term,
-    day: r.attr && r.attr.day,
-    usersFound: (r.attr && (r.attr.usersFound != null ? r.attr.usersFound : r.attr.usersNew)) || 0,
-    usersSaved: (r.attr && r.attr.usersNew) || 0,
-    contacts: 0,
-    tokenName: r.tokenId ? String(r.tokenId) : '—',
-    githubCount: (m[r.traceId] && m[r.traceId].github) || 0,
-    dbCount: (m[r.traceId] && m[r.traceId].db) || 0,
-    waitedMs: (m[r.traceId] && m[r.traceId].waitMs) || 0,
-    spanCount: (m[r.traceId] && m[r.traceId].spanCount) || 0,
-  })));
+  res.json({
+    page,
+    pages,
+    total,
+    traces: roots.map((r) => ({
+      traceId: r.traceId,
+      taskId: r.taskId,
+      agentId: r.agentId,
+      searchId: r.searchId,
+      attempt: r.attempt,
+      status: r.status,
+      durationMs: r.durationMs,
+      startTs: new Date(r.startTs).getTime(),
+      term: r.attr && r.attr.term,
+      day: r.attr && r.attr.day,
+      usersFound: (r.attr && (r.attr.usersFound != null ? r.attr.usersFound : r.attr.usersNew)) || 0,
+      usersSaved: (r.attr && r.attr.usersNew) || 0,
+      contacts: 0,
+      tokenName: r.tokenId ? String(r.tokenId) : '—',
+      githubCount: (m[r.traceId] && m[r.traceId].github) || 0,
+      dbCount: (m[r.traceId] && m[r.traceId].db) || 0,
+      waitedMs: (m[r.traceId] && m[r.traceId].waitMs) || 0,
+      spanCount: (m[r.traceId] && m[r.traceId].spanCount) || 0,
+    })),
+  });
 }));
 
 /* ---------------- one trace (waterfall) ---------------- */
@@ -201,7 +239,7 @@ router.get('/metrics/trace/:traceId', wrap(async (req, res) => {
 
 /* ---------------- tokens ---------------- */
 router.get('/metrics/tokens', wrap(async (req, res) => {
-  const R = rangeOf(req.query.range);
+  const R = rangeOf(req.query);
   const [tokens, waitSpans] = await Promise.all([
     Token.find({}).lean(),
     Span.find({ kind: 'token', startTs: { $gte: new Date(R.since) } }).select('tokenId durationMs').limit(SPAN_FETCH_CAP).lean(),
@@ -234,7 +272,7 @@ router.get('/metrics/tokens', wrap(async (req, res) => {
 
 /* ---------------- agents (fleet + utilization) ---------------- */
 router.get('/metrics/agents', wrap(async (req, res) => {
-  const R = rangeOf(req.query.range);
+  const R = rangeOf(req.query);
   const [agents, taskSpans] = await Promise.all([
     Agent.find({}).sort({ lastHeartbeat: -1 }).lean(),
     Span.find({ kind: 'task', startTs: { $gte: new Date(R.since) } })
@@ -264,7 +302,7 @@ router.get('/metrics/agents', wrap(async (req, res) => {
 
 /* ---------------- business yield ---------------- */
 router.get('/metrics/yield', wrap(async (req, res) => {
-  const R = rangeOf(req.query.range);
+  const R = rangeOf(req.query);
   const since = new Date(R.since);
   const [searchAgg, profiles, contacts, apify, savedAgg] = await Promise.all([
     Span.aggregate([
