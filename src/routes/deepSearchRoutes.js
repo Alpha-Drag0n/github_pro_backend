@@ -593,7 +593,7 @@ router.patch('/deep-searches/users/:id/rocketreach-location', async (req, res) =
  */
 router.post('/deep-searches', async (req, res) => {
   try {
-    const { fromDate, toDate } = req.body;
+    const { fromDate, toDate, autoChain } = req.body;
 
     if (!fromDate || !toDate) {
       return res.status(400).json({
@@ -624,6 +624,7 @@ router.post('/deep-searches', async (req, res) => {
     const search = new DeepSearch({
       searchId,
       status: 'pending',
+      autoChain: !!autoChain,
       dateRange: {
         fromDate: from,
         toDate: to,
@@ -655,6 +656,28 @@ router.post('/deep-searches', async (req, res) => {
   } catch (error) {
     logger.error(`Error creating iterative search: ${error.message}`);
     res.status(500).json({ error: 'Failed to create search' });
+  }
+});
+
+/**
+ * Toggle a search's auto-start (chaining) flag.
+ * PATCH /api/deep-searches/:id/auto-chain   Body: { autoChain: boolean }
+ */
+router.patch('/deep-searches/:id/auto-chain', async (req, res) => {
+  try {
+    const autoChain = !!req.body.autoChain;
+    const update = { autoChain };
+    if (!autoChain) update.autoStartAt = null; // disabling cancels any pending auto-start
+    const search = await DeepSearch.findOneAndUpdate(
+      { $or: [{ _id: req.params.id }, { searchId: req.params.id }] },
+      { $set: update },
+      { new: true }
+    );
+    if (!search) return res.status(404).json({ error: 'Search not found' });
+    res.json(serializeSearch(search));
+  } catch (error) {
+    logger.error(`Error updating auto-chain: ${error.message}`);
+    res.status(500).json({ error: 'Failed to update auto-chain' });
   }
 });
 
@@ -932,9 +955,8 @@ router.post('/deep-searches/:id/resume', async (req, res) => {
       return res.status(404).json({ error: 'Search not found' });
     }
 
-    // Any not-completed search can be resumed (failed, paused, pending, or a stuck
-    // in_progress left over from a restart). The launch guard below rejects a search
-    // that is genuinely still running in this process.
+    // Any not-completed search can be resumed (paused, failed, pending, or a stuck
+    // in_progress left over from a restart). Completed searches are rejected below.
     if (search.status === 'completed') {
       return res.status(400).json({
         error: 'Cannot resume search',
@@ -956,7 +978,7 @@ router.post('/deep-searches/:id/resume', async (req, res) => {
       await taskQueue.generateTasksForSearch(search);
     } else {
       await taskQueue.resumeSearch(search._id);
-      await DeepSearch.updateOne({ _id: search._id }, { $set: { resumedAt: new Date(), error: null } });
+      await DeepSearch.updateOne({ _id: search._id }, { $set: { resumedAt: new Date(), error: null, pausedAt: null } });
     }
 
     logger.info(`Deep search resumed: ${search.searchId}`);

@@ -18,13 +18,16 @@ const User = require('../../../models/userModel');
 const GitHubClient = require('../../../api/githubClient');
 const contactDiscoveryService = require('../../contactDiscoveryService');
 const tokenRateLimiter = require('../tokenRateLimiter');
-const { rotationPlan } = require('../agentConfig');
+const tracing = require('../../observability/tracing');
 const Logger = require('../../../utils/logger');
 
 const logger = new Logger();
 const BASE_URL = 'https://api.github.com';
 const GITHUB_SEARCH_CAP = 1000;
 const PROFILE_FETCH_DELAY_MS = 120;
+// Log which token each agent picks to the CONSOLE only (never persisted). Set
+// LOG_TOKEN_SELECTION=false to silence it.
+const LOG_TOKEN_SELECTION = process.env.LOG_TOKEN_SELECTION !== 'false';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -44,16 +47,36 @@ const MAX_CAPACITY_WAIT_MS = 4 * 60_000; // don't squat a lease forever when all
  * case it flags ctx.capacityAborted so the handler releases the task for a later retry
  * instead of holding the lease for the full per-task watchdog window.
  */
-async function acquireOrWait(resource, ctx) {
+async function acquireOrWait(resource, ctx, excludeIds = []) {
   const deadline = Date.now() + MAX_CAPACITY_WAIT_MS;
+  const waitStart = Date.now(); // capture the (previously invisible) token-wait latency
+  let waited = false;
   for (;;) {
     if (await ctx.shouldAbort()) return null;
-    const tok = await tokenRateLimiter.acquire(resource);
-    if (tok) return tok;
+    const tok = await tokenRateLimiter.acquire(resource, excludeIds);
+    if (tok) {
+      if (LOG_TOKEN_SELECTION) {
+        console.log(`[token] agent ${ctx.agentId || '?'} → "${tok.name}" (${resource})`);
+      }
+      // Only record when we actually had to wait — keeps the trace clean.
+      if (waited) {
+        tracing.recordLeaf({
+          name: 'token.wait', kind: 'token', start: waitStart, end: Date.now(),
+          status: 'ok', tokenId: tok._id,
+          attr: { resource, waitedMs: Date.now() - waitStart, acquiredToken: tok.name },
+        });
+      }
+      return tok;
+    }
     if (Date.now() >= deadline) {
       ctx.capacityAborted = true; // no token capacity for too long → give up this task
+      tracing.recordLeaf({
+        name: 'token.wait', kind: 'token', start: waitStart, end: Date.now(),
+        status: 'aborted', attr: { resource, waitedMs: Date.now() - waitStart, reason: 'capacity_timeout' },
+      });
       return null;
     }
+    waited = true;
     await sleep(2_000 + Math.floor(Math.random() * 1000)); // every token cooling → wait (C2) + jitter
   }
 }
@@ -70,26 +93,38 @@ async function paginatedSearch(query, ctx) {
   const results = [];
   const perPage = 100;
   const maxPages = GITHUB_SEARCH_CAP / perPage;
-  const { maxRotations, perToken } = rotationPlan(ctx.tokenCount);
-  let rotations = 0;
-  const failsByToken = new Map(); // token._id → consecutive failures (cool + rotate at perToken)
+  const tokenCount = Math.max(1, ctx.tokenCount || 1);
+  let tried = []; // DISTINCT-token rotation for the CURRENT page; reset once a page succeeds
 
   for (let page = 1; page <= maxPages; page++) {
-    let token = await acquireOrWait('search', ctx);
+    // Never re-pick a token that already failed this page → t1..tN are all different.
+    const token = await acquireOrWait('search', ctx, tried);
     if (!token) return { results, aborted: true };
+    tracing.setToken(token._id, token.name); // attribute subsequent spans to this token
 
     try {
-      const res = await axios.get(`${BASE_URL}/search/users`, {
-        headers: headers(token.token),
-        params: { q: query, per_page: perPage, page, sort: 'joined', order: 'desc' },
-        timeout: 15_000,
-      });
+      // This raw axios.get bypasses GitHubClient's interceptor, so wrap it explicitly
+      // → a github.search span per page (the deep-search hot path).
+      const res = await tracing.withSpan(
+        'github.search', 'github',
+        () => axios.get(`${BASE_URL}/search/users`, {
+          headers: headers(token.token),
+          params: { q: query, per_page: perPage, page, sort: 'joined', order: 'desc' },
+          timeout: 15_000,
+        }),
+        (r) => ({
+          method: 'GET', endpoint: '/search/users', page,
+          statusCode: r && r.status,
+          rateRemaining: r && r.headers ? Number(r.headers['x-ratelimit-remaining']) : undefined,
+          resultCount: r && r.data && Array.isArray(r.data.items) ? r.data.items.length : undefined,
+        })
+      );
       // Await reconcile so it serializes BEFORE the next page's acquire() decrement
       // (otherwise a late reconcile could clobber the new decrement).
       await tokenRateLimiter.reconcile(token._id, 'search', res.headers);
       await tokenRateLimiter.reportSuccess(token._id);
       ctx.requests++;
-      failsByToken.delete(token._id); // recovered → reset its failure streak
+      tried = []; // page ok → any token may serve the next page
 
       const items = res.data.items || [];
       results.push(...items);
@@ -103,32 +138,28 @@ async function paginatedSearch(query, ctx) {
       const kind = classifyTokenError(status);
       if (!kind) throw Object.assign(error, { code: `HTTP_${status || 'NETWORK'}` });
 
-      rotations++;
-      if (rotations > maxRotations) {
-        throw Object.assign(new Error(`search failed after ${rotations - 1} rotations`), { code: 'RATE_LIMIT' });
+      // Cool this token and exclude it for the rest of this page (rotate to a DISTINCT token).
+      const retryAfter = parseInt(error.response?.headers?.['retry-after'], 10);
+      await tokenRateLimiter.reportError(token._id, kind, retryAfter ? retryAfter * 1000 : 0);
+      tried.push(token._id);
+      if (tried.length >= tokenCount) {
+        // Tried every token once → give up this bucket (task retries later).
+        throw Object.assign(new Error(`search failed after trying ${tried.length} token(s)`), { code: 'RATE_LIMIT' });
       }
-      // Give a token `perToken` attempts before cooling it (the 1st failure may be transient);
-      // only then report the error so the limiter rotates it out.
-      const fails = (failsByToken.get(token._id) || 0) + 1;
-      failsByToken.set(token._id, fails);
-      if (fails >= perToken) {
-        const retryAfter = parseInt(error.response?.headers?.['retry-after'], 10);
-        await tokenRateLimiter.reportError(token._id, kind, retryAfter ? retryAfter * 1000 : 0);
-        failsByToken.delete(token._id);
-      }
-      page--; // retry the same page (same token if still warm, else the next one)
+      page--; // retry the same page with a different (not-yet-tried) token
       continue;
     }
   }
   return { results, aborted: false };
 }
 
-/** Build a core-API GitHubClient backed by the rate limiter, with a rotate() callback. */
-async function makeCoreClient(ctx) {
-  const token = await acquireOrWait('core', ctx);
+/** Build a core-API GitHubClient backed by the rate limiter. excludeIds → distinct rotation. */
+async function makeCoreClient(ctx, excludeIds = []) {
+  const token = await acquireOrWait('core', ctx, excludeIds);
   if (!token) return null;
+  tracing.setToken(token._id, token.name);
   return {
-    client: new GitHubClient(token.token, ctx.searchUuid),
+    client: new GitHubClient(token.token, ctx.searchUuid, { tokenId: token._id }),
     tokenId: token._id,
   };
 }
@@ -176,11 +207,10 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
         updated_at: existing.github_updated_at,
       };
     } else {
+      const tokenCount = Math.max(1, ctx.tokenCount || 1);
+      const tried = []; // token ids already tried → never re-selected (distinct rotation)
       core = await makeCoreClient(ctx);
       if (!core) break; // capacity/abort while waiting for a token
-      const { maxRotations, perToken } = rotationPlan(ctx.tokenCount);
-      let rotations = 0;
-      const failsByToken = new Map(); // token._id → consecutive failures (cool + rotate at perToken)
       let skip = false;
       for (;;) {
         try {
@@ -201,23 +231,18 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
             skip = true;
             break;
           }
-          rotations += 1;
-          if (rotations > maxRotations) {
-            logger.warn(`[bucket] profile fetch for ${username} gave up after ${rotations - 1} retries`);
+          // Cool this token and never pick it again this cycle → rotate to a DISTINCT token.
+          const ra = parseInt(e.response?.headers?.['retry-after'], 10);
+          await tokenRateLimiter.reportError(core.tokenId, kind, ra ? ra * 1000 : 0);
+          tried.push(core.tokenId);
+          if (tried.length >= tokenCount) {
+            // Tried every token once → give up on this user.
+            logger.warn(`[bucket] profile fetch for ${username} gave up after ${tried.length} token(s)`);
             skip = true;
             break;
           }
-          // Give a token `perToken` attempts before cooling it (the 1st failure may be
-          // transient); only then report the error so the limiter rotates it out.
-          const fails = (failsByToken.get(core.tokenId) || 0) + 1;
-          failsByToken.set(core.tokenId, fails);
-          if (fails >= perToken) {
-            const ra = parseInt(e.response?.headers?.['retry-after'], 10);
-            await tokenRateLimiter.reportError(core.tokenId, kind, ra ? ra * 1000 : 0);
-            failsByToken.delete(core.tokenId);
-          }
-          core = await makeCoreClient(ctx); // re-acquire: same token if still warm, else the next
-          if (!core) { skip = true; break; } // capacity/abort
+          core = await makeCoreClient(ctx, tried); // a token NOT yet tried this cycle
+          if (!core) { skip = true; break; } // no other token available / abort
           continue;
         }
       }
@@ -232,14 +257,18 @@ async function saveUsers(items, ctx, iteration, excludedLocations) {
     try {
       if (!core) core = await makeCoreClient(ctx);
       if (core) {
-        const discovery = await contactDiscoveryService.discoverContacts(core.client, username, {
-          profile,
-          tag: ctx.searchUuid,
-          rotate: async () => {
-            const next = await makeCoreClient(ctx);
-            return next ? next.client : null;
-          },
-        });
+        const discovery = await tracing.withSpan(
+          'contact.discover', 'compute',
+          () => contactDiscoveryService.discoverContacts(core.client, username, {
+            profile,
+            tag: ctx.searchUuid,
+            rotate: async () => {
+              const next = await makeCoreClient(ctx);
+              return next ? next.client : null;
+            },
+          }),
+          (d) => ({ username, repositoriesChecked: d && d.repositoriesChecked, foundContact: !!(d && d.contactInfo) })
+        );
         contactInfo = discovery.contactInfo;
         socialProfiles = discovery.socialProfiles;
         locationInfo = discovery.locationInfo;
@@ -295,10 +324,11 @@ async function run(payload, ctx) {
   const excluded = new Set();
   const maxIterations = 50;
   let usersNew = 0;
+  let usersFound = 0; // total results discovered across iterations (vs usersNew = saved)
 
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
     if ((await ctx.shouldAbort()) || ctx.capacityAborted) {
-      return { usersNew, requests: ctx.requests, aborted: true };
+      return { usersNew, usersFound, requests: ctx.requests, aborted: true };
     }
     await ctx.renew();
 
@@ -306,12 +336,13 @@ async function run(payload, ctx) {
     for (const loc of excluded) query += ` -location:"${loc}"`;
 
     const { results, aborted } = await paginatedSearch(query, ctx);
-    if (aborted) return { usersNew, requests: ctx.requests, aborted: true };
+    if (aborted) return { usersNew, usersFound, requests: ctx.requests, aborted: true };
     if (results.length === 0) break;
+    usersFound += results.length;
 
     const { created, locations } = await saveUsers(results, ctx, iteration, Array.from(excluded));
     usersNew += created;
-    if (ctx.capacityAborted) return { usersNew, requests: ctx.requests, aborted: true };
+    if (ctx.capacityAborted) return { usersNew, usersFound, requests: ctx.requests, aborted: true };
 
     const fresh = locations.filter((l) => !excluded.has(l));
     fresh.forEach((l) => excluded.add(l));
@@ -320,7 +351,7 @@ async function run(payload, ctx) {
     if (fresh.length === 0) break;
   }
 
-  return { usersNew, requests: ctx.requests };
+  return { usersNew, usersFound, requests: ctx.requests };
 }
 
 module.exports = { type: 'deep-search-bucket', run };

@@ -21,14 +21,16 @@ const WINDOW_MS = { search: 60_000, core: 3_600_000 };
 /**
  * Atomically claim one request unit from an available token for `resource`.
  * @param {'search'|'core'} resource
+ * @param {Array} [excludeIds] token _ids to skip (already tried this rotation → distinct picks)
  * @returns {Promise<{ _id, token, name } | null>} token doc (budget already decremented) or null
  */
-async function acquire(resource = 'search') {
+async function acquire(resource = 'search', excludeIds = []) {
   const path = `budget.${resource}`;
   const windowMs = WINDOW_MS[resource] || WINDOW_MS.search;
 
   const usable = {
     disabled: { $ne: true },
+    ...(excludeIds && excludeIds.length ? { _id: { $nin: excludeIds } } : {}),
     $and: [
       { $or: [{ cooldownUntil: null }, { cooldownUntil: { $lte: new Date() } }] },
       {

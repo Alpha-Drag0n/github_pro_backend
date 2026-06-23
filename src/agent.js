@@ -15,6 +15,10 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
+// Require tracing FIRST so its global mongoose plugin is installed before any
+// model is compiled (otherwise models loaded earlier miss DB span capture).
+const tracing = require('./services/observability/tracing');
+
 const http = require('http');
 const Database = require('./utils/database');
 const Logger = require('./utils/logger');
@@ -71,6 +75,7 @@ async function main() {
     stopSelfKeepAlive();
     healthServer.close();
     await Promise.all(agents.map((a) => a.stop().catch(() => {})));
+    await tracing.shutdown().catch(() => {}); // flush buffered spans
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
