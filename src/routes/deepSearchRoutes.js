@@ -634,13 +634,15 @@ router.post('/deep-searches', async (req, res) => {
 router.patch('/deep-searches/:id/auto-chain', async (req, res) => {
   try {
     const autoChain = !!req.body.autoChain;
+    const update = { autoChain };
+    if (!autoChain) update.autoStartAt = null; // disabling cancels any pending auto-start
     const search = await DeepSearch.findOneAndUpdate(
       { $or: [{ _id: req.params.id }, { searchId: req.params.id }] },
-      { $set: { autoChain } },
+      { $set: update },
       { new: true }
     );
     if (!search) return res.status(404).json({ error: 'Search not found' });
-    res.json({ searchId: search.searchId, autoChain: search.autoChain });
+    res.json(serializeSearch(search));
   } catch (error) {
     logger.error(`Error updating auto-chain: ${error.message}`);
     res.status(500).json({ error: 'Failed to update auto-chain' });

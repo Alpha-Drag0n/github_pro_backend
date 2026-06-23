@@ -442,7 +442,14 @@ async function setTaskPriority(taskId, priority) {
  */
 async function scheduleNextChainedSearch(completedSearchId) {
   if (!AUTO_CHAIN) return null;
-  const done = await DeepSearch.findById(completedSearchId).select('dateRange.fromDate');
+  // Idempotent per completion: atomically claim THIS completed search so a re-derived
+  // 'completed' status or an overlapping rollup tick can schedule the successor only once.
+  // (findOneAndUpdate returns the pre-update doc; null means it was already claimed.)
+  const done = await DeepSearch.findOneAndUpdate(
+    { _id: completedSearchId, chainScheduled: { $ne: true } },
+    { $set: { chainScheduled: true } },
+    { projection: { 'dateRange.fromDate': 1 } }
+  );
   if (!done?.dateRange?.fromDate) return null;
 
   const next = await DeepSearch.findOneAndUpdate(
@@ -468,18 +475,36 @@ async function scheduleNextChainedSearch(completedSearchId) {
 async function startDueChainedSearches() {
   if (!AUTO_CHAIN) return [];
   const now = new Date();
-  const due = await DeepSearch.find({ status: 'pending', autoStartAt: { $ne: null, $lte: now } }).select('_id');
+  // Re-check autoChain so a search de-opted (Switch toggled off) during its delay never starts.
+  const due = await DeepSearch.find({
+    status: 'pending',
+    autoChain: true,
+    autoStartAt: { $ne: null, $lte: now },
+  }).select('_id');
   const started = [];
   for (const d of due) {
-    const search = await DeepSearch.findOneAndUpdate(
-      { _id: d._id, status: 'pending', autoStartAt: { $lte: now } },
-      { $set: { status: 'in_progress', startedAt: new Date(), 'control.desired': 'run', error: null, autoStartAt: null } },
-      { new: true }
-    );
-    if (!search) continue; // already started/changed by something else
-    await generateTasksForSearch(search);
-    started.push(search);
-    await events.emit({ type: 'control.chain', searchId: search._id, message: 'auto-started (chained)' });
+    let search = null;
+    try {
+      search = await DeepSearch.findOneAndUpdate(
+        { _id: d._id, status: 'pending', autoChain: true, autoStartAt: { $lte: now } },
+        { $set: { status: 'in_progress', startedAt: new Date(), 'control.desired': 'run', error: null, autoStartAt: null } },
+        { new: true }
+      );
+      if (!search) continue; // already started/de-opted/changed by something else
+      await generateTasksForSearch(search);
+      started.push(search);
+      await events.emit({ type: 'control.chain', searchId: search._id, message: 'auto-started (chained)' });
+    } catch (e) {
+      // Generation failed AFTER the claim → revert to pending + reschedule shortly, so it RETRIES
+      // instead of sitting in_progress with zero tasks (which rollup would mark 'completed').
+      // Per-iteration catch so one failure doesn't abort the remaining due searches.
+      if (search) {
+        await DeepSearch.updateOne(
+          { _id: search._id, status: 'in_progress' },
+          { $set: { status: 'pending', autoStartAt: new Date(Date.now() + 30_000) } }
+        ).catch(() => {});
+      }
+    }
   }
   return started;
 }

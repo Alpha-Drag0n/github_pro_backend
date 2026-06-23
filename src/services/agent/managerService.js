@@ -35,9 +35,13 @@ function startManager(io) {
     }, REAPER_INTERVAL_MS)
   );
 
-  // Progress rollup for active searches.
+  // Progress rollup for active searches. Non-reentrant: a slow tick must not overlap the next
+  // (overlapping ticks could re-observe a just-completed search and double-schedule the chain).
+  let rollupRunning = false;
   timers.push(
     setInterval(async () => {
+      if (rollupRunning) return;
+      rollupRunning = true;
       try {
         const active = await DeepSearch.find({
           status: { $in: ['in_progress', 'paused'] },
@@ -87,6 +91,8 @@ function startManager(io) {
         }
       } catch (e) {
         logger.error(`[manager] rollup error: ${e.message}`);
+      } finally {
+        rollupRunning = false;
       }
     }, ROLLUP_INTERVAL_MS)
   );

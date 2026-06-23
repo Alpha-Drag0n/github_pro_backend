@@ -75,6 +75,9 @@ const iterativeSearchSchema = new mongoose.Schema({
   // Auto-chaining: when a previous (earlier-dated) search completes, the next pending autoChain
   // search is scheduled to start at this time. The manager starts it once now >= autoStartAt.
   autoStartAt: { type: Date, default: null },
+  // Set once when THIS search's completion has already scheduled its successor — makes chaining
+  // idempotent per completion, so overlapping rollup ticks can't double-schedule the chain.
+  chainScheduled: { type: Boolean, default: false },
   progress: {
     totalBuckets: { type: Number, default: 0 },
     done: { type: Number, default: 0 },
