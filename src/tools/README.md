@@ -75,8 +75,16 @@ compact (one doc per line). Import in Compass: *Collection → Add Data → Impo
   cluster. Note: dry-run files stay on disk while their docs stay online, so the next real run
   re-exports them; delete dry-run files first or use `--out ./data_dryrun`.
 
+## Watch mode & network errors
+
+In `--watch`, a **clean** run is followed by `--interval` seconds (default 300). A **failed**
+run (e.g. a network drop / Atlas unreachable) retries fast — `--retry-interval` seconds
+(default 5) with exponential backoff up to 60s — instead of waiting the full interval. Once a
+run succeeds, the cadence resets to `--interval`. A failed *startup* connect in watch mode also
+retries (the watcher won't die on a blip). One-shot (`--once`) still fails fast.
+
 ## Flags
 
 `--uri --db --out --mode (both|telemetry|users) --telemetry <csv> --statuses <csv>
- --watch --interval <sec> --max-part-mb <n> --max-part-docs <n> --batch <n>
- --dry-run --no-verify --pretty`
+ --watch --interval <sec> --retry-interval <sec> --max-part-mb <n> --max-part-docs <n>
+ --batch <n> --dry-run --no-verify --pretty`

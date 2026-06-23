@@ -50,7 +50,9 @@
  *                      Allowed: spans,events,logs. (logs only if you don't use Quick Search.)
  *   --statuses <csv>   Deep-search statuses whose users are drainable (default "completed").
  *   --watch            Run continuously; otherwise run once and exit.
- *   --interval <sec>   Watch loop interval in seconds (default 300).
+ *   --interval <sec>   Loop interval after a CLEAN run (default 300).
+ *   --retry-interval <sec>  After a FAILED run (e.g. network drop), retry this fast with
+ *                           exponential backoff instead of waiting --interval (default 5).
  *   --max-part-mb <n>  Roll to a new part file at this size (default 128).
  *   --max-part-docs <n> Roll to a new part file at this doc count (default 100000).
  *   --batch <n>        Cursor batch size (default 2000).
@@ -314,13 +316,31 @@ async function main() {
   };
   const outBase = a.out || path.resolve(__dirname, '../../../data');
 
-  const client = new MongoClient(uri);
-  await client.connect();
-  const db = a.db ? client.db(a.db) : client.db();
-  console.log(`Connected (online): db="${db.databaseName}"  mode=${opts.mode}  telemetry=[${opts.telemetry}]  users-statuses=[${opts.statuses}]`);
+  const intervalMs = (parseInt(a.interval || '300', 10)) * 1000;       // cadence after a clean run
+  const retryMs = Math.max(parseInt(a['retry-interval'] || '5', 10), 1) * 1000; // fast retry after a failure
+  const retryCapMs = Math.min(intervalMs || retryMs, 60 * 1000);       // backoff ceiling
 
   let stopping = false;
   const ctxFor = () => ({ dir: ensureDayDir(outBase), opts });
+  process.on('SIGINT', () => { console.log('\nSIGINT — finishing, will stop after this run.'); stopping = true; });
+
+  // serverSelectionTimeoutMS keeps a down-network op from hanging the default 30s before it throws.
+  const client = new MongoClient(uri, { serverSelectionTimeoutMS: 20000 });
+
+  // Connect. In watch mode, retry a failed startup connect instead of exiting.
+  let backoff = retryMs;
+  for (;;) {
+    try { await client.connect(); break; }
+    catch (e) {
+      if (!a.watch) throw e; // one-shot: fail fast as before
+      if (stopping) { await client.close().catch(() => {}); return; }
+      console.error(`Connect failed (${isConnectionError(e) ? 'connection' : 'error'}): ${e.message} — retrying in ${Math.round(backoff / 1000)}s`);
+      await sleep(backoff, () => stopping);
+      backoff = Math.min(backoff * 2, retryCapMs);
+    }
+  }
+  const db = a.db ? client.db(a.db) : client.db();
+  console.log(`Connected (online): db="${db.databaseName}"  mode=${opts.mode}  telemetry=[${opts.telemetry}]  users-statuses=[${opts.statuses}]`);
 
   if (!a.watch) {
     await runOnce(db, ctxFor());
@@ -328,15 +348,25 @@ async function main() {
     return;
   }
 
-  const intervalMs = (parseInt(a.interval || '300', 10)) * 1000;
-  process.on('SIGINT', () => { console.log('\nSIGINT — finishing, will stop after this run.'); stopping = true; });
-  console.log(`Watch mode: every ${intervalMs / 1000}s. Ctrl+C to stop.`);
+  console.log(`Watch mode: every ${intervalMs / 1000}s after a clean run; retry in ${retryMs / 1000}s (backoff to ${retryCapMs / 1000}s) on failure. Ctrl+C to stop.`);
   /* eslint-disable no-await-in-loop */
+  backoff = retryMs;
   while (!stopping) {
-    try { await runOnce(db, ctxFor()); }
-    catch (e) { console.error('Run error (will retry next interval):', e.message); }
+    let failed = false;
+    try {
+      await runOnce(db, ctxFor());
+    } catch (e) {
+      failed = true;
+      console.error(`Run failed (${isConnectionError(e) ? 'connection' : 'error'}): ${e.message} — retrying in ${Math.round(backoff / 1000)}s`);
+    }
     if (stopping) break;
-    await sleep(intervalMs, () => stopping);
+    if (failed) {
+      await sleep(backoff, () => stopping);          // retry fast...
+      backoff = Math.min(backoff * 2, retryCapMs);   // ...backing off if it keeps failing
+    } else {
+      backoff = retryMs;                             // clean run -> reset and wait the normal interval
+      await sleep(intervalMs, () => stopping);
+    }
   }
   await client.close();
   console.log('Stopped.');
@@ -357,6 +387,14 @@ function sleep(ms, abort) {
       if (waited >= ms || (abort && abort())) { clearInterval(t); resolve(); }
     }, step);
   });
+}
+
+/** Heuristic: is this error a network/connectivity problem (vs a logic/data error)? */
+function isConnectionError(e) {
+  const name = (e && e.name) || '';
+  const msg = (e && e.message) || '';
+  return /MongoNetwork|MongoServerSelection|MongoNotConnected|MongoTopologyClosed/i.test(name)
+    || /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EAI_AGAIN|getaddrinfo|server selection|topology|socket/i.test(msg);
 }
 
 main().catch((e) => { console.error('FATAL:', e); process.exit(1); });

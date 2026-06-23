@@ -8,6 +8,7 @@
     "dev": "node src/server.js",
     "agent": "node src/agent.js",
     "drain": "node src/tools/drainer.js",
+    "drain:import": "node src/tools/importer.js",
     "cli": "node src/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
