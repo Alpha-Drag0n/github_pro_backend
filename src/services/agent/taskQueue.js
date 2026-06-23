@@ -21,6 +21,11 @@ const { LEASE_TTL_MS, MAX_ATTEMPTS, FORCE_ASSIGN_GRACE_MS } = require('./agentCo
 
 const DAY_MS = 1000 * 60 * 60 * 24;
 
+// Auto-chaining of day-by-day deep searches: when one completes, the next pending search (by
+// date) auto-starts CHAIN_DELAY_MS later. Set DEEP_SEARCH_AUTO_CHAIN=false to disable.
+const CHAIN_DELAY_MS = parseInt(process.env.DEEP_SEARCH_CHAIN_DELAY_MS || '300000', 10); // 5 min
+const AUTO_CHAIN = process.env.DEEP_SEARCH_AUTO_CHAIN !== 'false';
+
 const lease = (ms) => ({ $add: ['$$NOW', ms] });
 
 /* ============================ MANAGER: generation ============================ */
@@ -427,6 +432,58 @@ async function setTaskPriority(taskId, priority) {
   await Task.updateOne({ _id: taskId }, { $set: { priority } });
 }
 
+/* ============================ MANAGER: auto-chaining ============================ */
+
+/**
+ * After a search completes, schedule the NEXT day's search to auto-start CHAIN_DELAY_MS later:
+ * the pending search that is opted into chaining (autoChain:true) with the smallest
+ * dateRange.fromDate strictly after the completed one. Atomic on `autoStartAt: null` so
+ * concurrent completions can't double-book it.
+ */
+async function scheduleNextChainedSearch(completedSearchId) {
+  if (!AUTO_CHAIN) return null;
+  const done = await DeepSearch.findById(completedSearchId).select('dateRange.fromDate');
+  if (!done?.dateRange?.fromDate) return null;
+
+  const next = await DeepSearch.findOneAndUpdate(
+    { status: 'pending', autoChain: true, autoStartAt: null, 'dateRange.fromDate': { $gt: done.dateRange.fromDate } },
+    { $set: { autoStartAt: new Date(Date.now() + CHAIN_DELAY_MS) } },
+    { sort: { 'dateRange.fromDate': 1 }, new: true }
+  );
+  if (next) {
+    await events.emit({
+      type: 'control.chain',
+      searchId: next._id,
+      message: `auto-start scheduled (+${Math.round(CHAIN_DELAY_MS / 1000)}s) after ${completedSearchId} completed`,
+    });
+  }
+  return next;
+}
+
+/**
+ * Start any searches whose scheduled auto-start time has arrived. Crash-safe (the schedule
+ * lives in the DB, so a manager restart still fires it) and idempotent (atomic pending→
+ * in_progress claim). Returns the started search docs.
+ */
+async function startDueChainedSearches() {
+  if (!AUTO_CHAIN) return [];
+  const now = new Date();
+  const due = await DeepSearch.find({ status: 'pending', autoStartAt: { $ne: null, $lte: now } }).select('_id');
+  const started = [];
+  for (const d of due) {
+    const search = await DeepSearch.findOneAndUpdate(
+      { _id: d._id, status: 'pending', autoStartAt: { $lte: now } },
+      { $set: { status: 'in_progress', startedAt: new Date(), 'control.desired': 'run', error: null, autoStartAt: null } },
+      { new: true }
+    );
+    if (!search) continue; // already started/changed by something else
+    await generateTasksForSearch(search);
+    started.push(search);
+    await events.emit({ type: 'control.chain', searchId: search._id, message: 'auto-started (chained)' });
+  }
+  return started;
+}
+
 module.exports = {
   generateTasksForSearch,
   claimTask,
@@ -444,4 +501,6 @@ module.exports = {
   retryTask,
   setTaskStatus,
   setTaskPriority,
+  scheduleNextChainedSearch,
+  startDueChainedSearches,
 };

@@ -69,6 +69,12 @@ const iterativeSearchSchema = new mongoose.Schema({
     requestedAt: Date,
   },
   priority: { type: Number, default: 0 }, // propagates to this job's tasks' priority
+  // Per-search opt-in (a checkbox on the Deep Search page): only searches with autoChain:true
+  // are auto-started by the chain when the previous earlier-dated search completes.
+  autoChain: { type: Boolean, default: false },
+  // Auto-chaining: when a previous (earlier-dated) search completes, the next pending autoChain
+  // search is scheduled to start at this time. The manager starts it once now >= autoStartAt.
+  autoStartAt: { type: Date, default: null },
   progress: {
     totalBuckets: { type: Number, default: 0 },
     done: { type: Number, default: 0 },

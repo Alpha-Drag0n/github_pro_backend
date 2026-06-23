@@ -561,7 +561,7 @@ router.patch('/deep-searches/users/:id/rocketreach-location', async (req, res) =
  */
 router.post('/deep-searches', async (req, res) => {
   try {
-    const { fromDate, toDate } = req.body;
+    const { fromDate, toDate, autoChain } = req.body;
 
     if (!fromDate || !toDate) {
       return res.status(400).json({
@@ -592,6 +592,7 @@ router.post('/deep-searches', async (req, res) => {
     const search = new DeepSearch({
       searchId,
       status: 'pending',
+      autoChain: !!autoChain,
       dateRange: {
         fromDate: from,
         toDate: to,
@@ -623,6 +624,26 @@ router.post('/deep-searches', async (req, res) => {
   } catch (error) {
     logger.error(`Error creating iterative search: ${error.message}`);
     res.status(500).json({ error: 'Failed to create search' });
+  }
+});
+
+/**
+ * Toggle a search's auto-start (chaining) flag.
+ * PATCH /api/deep-searches/:id/auto-chain   Body: { autoChain: boolean }
+ */
+router.patch('/deep-searches/:id/auto-chain', async (req, res) => {
+  try {
+    const autoChain = !!req.body.autoChain;
+    const search = await DeepSearch.findOneAndUpdate(
+      { $or: [{ _id: req.params.id }, { searchId: req.params.id }] },
+      { $set: { autoChain } },
+      { new: true }
+    );
+    if (!search) return res.status(404).json({ error: 'Search not found' });
+    res.json({ searchId: search.searchId, autoChain: search.autoChain });
+  } catch (error) {
+    logger.error(`Error updating auto-chain: ${error.message}`);
+    res.status(500).json({ error: 'Failed to update auto-chain' });
   }
 });
 
