@@ -118,12 +118,24 @@ function isLinkedInUrl(url) {
   return linkedInPath(url) !== '';
 }
 
-/** Every distinct usable LinkedIn URL on a user document (a user may have several). */
+/**
+ * Every distinct usable LinkedIn URL on a user document, de-duplicated by PROFILE
+ * IDENTITY (slug) — not by raw string — so two forms of the same profile
+ * (e.g. `linkedin.com/in/foo` and `https://www.linkedin.com/in/foo`) collapse to one
+ * and never become two Apify requests / two profile entries.
+ */
 function allLinkedInUrls(user) {
-  const urls = (user?.socialProfiles?.linkedin || [])
-    .map((l) => (l && l.url ? String(l.url).trim() : ''))
-    .filter((u) => isLinkedInUrl(u));
-  return [...new Set(urls)];
+  const seen = new Set();
+  const out = [];
+  for (const l of user?.socialProfiles?.linkedin || []) {
+    const u = l && l.url ? String(l.url).trim() : '';
+    if (!isLinkedInUrl(u)) continue;
+    const key = linkedInPath(u) || u.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(u);
+  }
+  return out;
 }
 
 /** Ensure a URL has a scheme so the Apify actor accepts it (prepends https://). */
@@ -308,23 +320,58 @@ async function runChunk(queries, opts) {
  * @param {string[]} urls - LinkedIn profile URLs to enrich
  * @param {object}   [opts]
  * @param {string[]} [opts.countryFilter] - actor countryFilter input
- * @returns {Promise<{ tokenDoc, byUrl: Map<normUrl, profile>, raw: object[] }>}
+ * `queriedSlugs` is the set of profile slugs actually SENT to Apify (completed chunks).
+ * If a later chunk fails after earlier ones succeeded, we KEEP the already-paid results
+ * and return them — the caller persists only `queriedSlugs`, so already-charged profiles
+ * are never re-sent on a retry. (If the very first chunk fails, we throw — nothing was
+ * paid, so the users stay eligible and a re-run is not a double charge.)
+ *
+ * @returns {Promise<{ tokenDoc, byUrl: Map<identityPath, profile>, queriedSlugs: Set, raw: object[] }>}
  */
 async function enrichLinkedInProfiles(urls, opts = {}) {
-  const cleanUrls = [...new Set((urls || []).map((u) => String(u || '').trim()).filter(Boolean))];
+  // De-duplicate by PROFILE IDENTITY (slug), not raw string — so the same profile in
+  // different URL forms (across users or a single user) is sent to Apify exactly once.
+  const seen = new Set();
+  const cleanUrls = [];
+  for (const raw of urls || []) {
+    const u = String(raw || '').trim();
+    if (!u) continue;
+    const key = linkedInPath(u) || u.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleanUrls.push(u);
+  }
   if (cleanUrls.length === 0) {
-    return { tokenDoc: null, byUrl: new Map(), raw: [] };
+    return { tokenDoc: null, byUrl: new Map(), queriedSlugs: new Set(), raw: [] };
   }
 
   const byUrl = new Map();
+  const queriedSlugs = new Set(); // slugs we actually SENT (completed chunks)
   const raw = [];
   let lastToken = null;
 
   for (let i = 0; i < cleanUrls.length; i += MAX_RESULTS_PER_RUN) {
     const chunk = cleanUrls.slice(i, i + MAX_RESULTS_PER_RUN);
-    const { tokenDoc, items } = await runChunk(chunk, opts);
+
+    let result;
+    try {
+      result = await runChunk(chunk, opts);
+    } catch (err) {
+      // Nothing paid yet → propagate (users stay eligible; re-run is not a double charge).
+      if (queriedSlugs.size === 0) throw err;
+      // Some chunks already succeeded (paid) → keep them; stop here so those results are
+      // persisted and never re-sent.
+      logger.warn(`Apify enrichment stopped after a chunk error; keeping ${queriedSlugs.size} already-queried profile(s): ${err.message}`);
+      break;
+    }
+
+    const { tokenDoc, items } = result;
     lastToken = tokenDoc;
     raw.push(...items);
+    for (const u of chunk) {
+      const k = linkedInPath(u) || u.toLowerCase();
+      if (k) queriedSlugs.add(k);
+    }
 
     // Join results back to the queried URLs (positional within the chunk). Also key
     // by the actor's canonical profileUrl — but ONLY for genuine matches, so a
@@ -339,7 +386,7 @@ async function enrichLinkedInProfiles(urls, opts = {}) {
     });
   }
 
-  return { tokenDoc: lastToken, byUrl, raw };
+  return { tokenDoc: lastToken, byUrl, queriedSlugs, raw };
 }
 
 /** Increment counters on the token document (no-op for env-only tokens). */

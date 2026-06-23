@@ -23,6 +23,9 @@ const logger = new Logger();
 /** Guards against launching two background loops for the same search in one process. */
 const runningIterativeSearches = new Set();
 
+/** Serializes LinkedIn enrichment so overlapping requests can't double-charge Apify. */
+let enrichInProgress = false;
+
 /**
  * Assign a token and run the iterative search in the background (fire-and-forget).
  * Releases the worker guard and token assignment when finished.
@@ -332,15 +335,26 @@ async function enrichUserDocs(users) {
 
   // One actor run for the union of all URLs (scheme-normalized so Apify accepts them).
   const allUrls = targets.flatMap((t) => t.urls.map((u) => apifyService.toQueryUrl(u)));
-  const { byUrl } = await apifyService.enrichLinkedInProfiles(allUrls);
+  const { byUrl, queriedSlugs } = await apifyService.enrichLinkedInProfiles(allUrls);
 
   const results = [];
   let found = 0;
   let notFound = 0;
+  let skippedUnsent = 0; // users whose URLs weren't sent (a chunk failed) → leave eligible
   for (const { user, urls } of targets) {
-    // Build one profile entry per URL this user has.
-    const profiles = urls.map((u) => {
-      const matched = byUrl.get(apifyService.normalizeLinkedInUrl(u));
+    // Only the URLs actually SENT to Apify (completed chunks). If a later chunk failed,
+    // unsent users are left untouched so they're retried WITHOUT re-charging the
+    // already-paid ones.
+    const sentUrls = urls.filter((u) => queriedSlugs.has(apifyService.linkedInPath(u)));
+    if (sentUrls.length === 0) {
+      skippedUnsent += 1;
+      continue;
+    }
+
+    // Build one profile entry per sent URL. Match by profile-URL slug (linkedInPath) —
+    // the actor reorders rows, so we can't rely on position.
+    const profiles = sentUrls.map((u) => {
+      const matched = byUrl.get(apifyService.linkedInPath(u));
       if (matched) return { ...matched, sourceUrl: u };
       return {
         sourceUrl: u,
@@ -363,7 +377,13 @@ async function enrichUserDocs(users) {
     results.push({ userId: user._id, username: user.username, status: info.status, linkedinInfo: info });
   }
 
-  return { processed: targets.length, found, notFound, skipped: users.length - targets.length, results };
+  return {
+    processed: results.length,
+    found,
+    notFound,
+    skipped: users.length - targets.length + skippedUnsent,
+    results,
+  };
 }
 
 /**
@@ -408,8 +428,16 @@ router.get('/deep-searches/users/linkedin-stats', async (req, res) => {
  *                                   no linkedinInfo yet) matching the given filter params;
  *                                   returns `remaining` so the UI can loop to drain the set.
  * Runs all selected URLs through Apify in ONE actor run. Declared before '/deep-searches/:id'.
+ *
+ * Guarded so only ONE enrichment runs at a time in this process: two overlapping requests
+ * (two tabs, a double-click, or bulk + per-page) can't both select the same users and
+ * issue duplicate PAID Apify calls. Mirrors `runningIterativeSearches`.
  */
 router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
+  if (enrichInProgress) {
+    return res.status(409).json({ error: 'Another LinkedIn enrichment is already running. Please wait for it to finish.' });
+  }
+  enrichInProgress = true;
   try {
     const { ids, filter, max } = req.body || {};
 
@@ -465,22 +493,25 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
       }
       const out = await enrichUserDocs(users);
 
-      // Drain any fetched user that yielded no usable URL by writing a marker, so the
-      // bulk loop always makes progress (only relevant in unprocessed mode — retry
-      // targets already carry a URL). Guarantees termination.
+      // Drain only users that have NO usable URL (so the loop progresses past them).
+      // Users left UNSENT by a mid-run chunk failure DO have a URL and are intentionally
+      // left eligible (no marker) so they're retried without re-charging already-paid
+      // profiles. Retry mode targets already carry a URL, so nothing to drain there.
+      let drainedNoUrl = 0;
       if (!retry) {
-        const enrichedIds = new Set(out.results.map((r) => String(r.userId)));
-        const stuck = users.filter((u) => !enrichedIds.has(String(u._id)));
+        const stuck = users.filter((u) => apifyService.allLinkedInUrls(u).length === 0);
         if (stuck.length) {
           await User.updateMany(
             { _id: { $in: stuck.map((u) => u._id) } },
             { $set: { linkedinInfo: { status: 'error', profiles: [], updatedAt: new Date() } } }
           );
+          drainedNoUrl = stuck.length;
         }
       }
 
-      // Every processed user now has a fresh updatedAt → it leaves the target set.
-      const handled = users.length;
+      // `handled` = users that actually left the target set this batch (written results +
+      // no-URL drains). When 0 (e.g. a persistent partial failure), the client loop stops.
+      const handled = out.processed + drainedNoUrl;
       const remaining = await User.countDocuments(targetFilter);
       return res.json({ message: 'LinkedIn enrichment complete', mode: retry ? 'retry' : 'filter', ...out, handled, remaining });
     }
@@ -492,6 +523,8 @@ router.post('/deep-searches/users/enrich-linkedin', async (req, res) => {
     }
     logger.error(`Error enriching LinkedIn profiles: ${error.message}`);
     res.status(500).json({ error: 'Failed to enrich LinkedIn profiles' });
+  } finally {
+    enrichInProgress = false;
   }
 });
 
