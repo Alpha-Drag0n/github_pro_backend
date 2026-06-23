@@ -338,9 +338,10 @@ async function enrichUserDocs(users) {
   let found = 0;
   let notFound = 0;
   for (const { user, urls } of targets) {
-    // Build one profile entry per URL this user has.
+    // Build one profile entry per URL this user has. Match by profile-URL slug
+    // (linkedInPath) — the actor reorders rows, so we can't rely on position.
     const profiles = urls.map((u) => {
-      const matched = byUrl.get(apifyService.normalizeLinkedInUrl(u));
+      const matched = byUrl.get(apifyService.linkedInPath(u));
       if (matched) return { ...matched, sourceUrl: u };
       return {
         sourceUrl: u,

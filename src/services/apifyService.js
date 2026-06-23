@@ -197,30 +197,21 @@ function notFoundProfile(queriedUrl) {
 }
 
 /**
- * Map a single Apify dataset item to one `linkedinInfo.profiles[]` entry.
- * The actor returns rows positionally aligned with the input queries; rows for
- * companies / failed lookups come back as all-null. `queriedUrl` is the URL we
- * asked for, preserved so we can join the row back to the right user/URL.
- *
- * A row is accepted as "found" ONLY when the returned profileUrl is the SAME
- * profile we queried. The actor sometimes returns an unrelated fallback profile
- * for an unresolvable query — those are treated as not found and NOT saved.
+ * Map one RESOLVED Apify dataset row to a `linkedinInfo.profiles[]` entry. Callers
+ * pass only rows that actually resolved (profileUrl + fullName present) and join them
+ * to users by the profile-URL slug — so there is no positional/guess matching here.
+ * `sourceUrl` defaults to the canonical profileUrl; the caller overrides it with the
+ * user's own queried URL.
  */
-function mapItemToProfile(item, queriedUrl) {
-  const returnedUrl = item?.profileUrl || null;
-  const found =
-    !!(returnedUrl && item.fullName) && sameLinkedInProfile(queriedUrl, returnedUrl);
-
-  if (!found) return notFoundProfile(queriedUrl);
-
+function mapItemToProfile(item) {
   const loc = item.location || null;
   const parsed = (loc && loc.parsed) || {};
 
   return {
-    sourceUrl: queriedUrl || returnedUrl,
+    sourceUrl: item.profileUrl || null,
     status: 'found',
     fullName: item.fullName || null,
-    profileUrl: returnedUrl,
+    profileUrl: item.profileUrl || null,
     headline: item.headline || null,
     location: loc
       ? {
@@ -305,10 +296,16 @@ async function runChunk(queries, opts) {
  * regardless of how many URLs the caller passes (a user may have several). Each
  * chunk applies the token-failover above; results are merged.
  *
+ * Results are joined to users by the profile-URL SLUG (linkedInPath), NOT by array
+ * position: the actor returns rows in arbitrary order and omits failed lookups, so a
+ * positional join mis-assigns results (and made the same-profile guard drop valid
+ * ones). The returned map is keyed by linkedInPath(profileUrl); a user matches when
+ * their queried URL has the same /in|/company slug.
+ *
  * @param {string[]} urls - LinkedIn profile URLs to enrich
  * @param {object}   [opts]
  * @param {string[]} [opts.countryFilter] - actor countryFilter input
- * @returns {Promise<{ tokenDoc, byUrl: Map<normUrl, profile>, raw: object[] }>}
+ * @returns {Promise<{ tokenDoc, byUrl: Map<identityPath, profile>, raw: object[] }>}
  */
 async function enrichLinkedInProfiles(urls, opts = {}) {
   const cleanUrls = [...new Set((urls || []).map((u) => String(u || '').trim()).filter(Boolean))];
@@ -326,16 +323,13 @@ async function enrichLinkedInProfiles(urls, opts = {}) {
     lastToken = tokenDoc;
     raw.push(...items);
 
-    // Join results back to the queried URLs (positional within the chunk). Also key
-    // by the actor's canonical profileUrl — but ONLY for genuine matches, so a
-    // mismatched fallback profile can never overwrite another user's real match.
-    items.forEach((item, idx) => {
-      const queriedUrl = chunk[idx];
-      const info = mapItemToProfile(item, queriedUrl);
-      if (queriedUrl) byUrl.set(normalizeLinkedInUrl(queriedUrl), info);
-      if (info.status === 'found' && item?.profileUrl) {
-        byUrl.set(normalizeLinkedInUrl(item.profileUrl), info);
-      }
+    // Key each RESOLVED row by its own profileUrl slug (order-independent). Skip nulls
+    // / failed lookups. A user is matched later iff their queried URL shares the slug,
+    // which both fixes the reorder misses and still rejects unrelated fallback rows.
+    items.forEach((item) => {
+      if (!item || !item.profileUrl || !item.fullName) return;
+      const key = linkedInPath(item.profileUrl);
+      if (key) byUrl.set(key, mapItemToProfile(item));
     });
   }
 
