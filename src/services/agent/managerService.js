@@ -35,9 +35,13 @@ function startManager(io) {
     }, REAPER_INTERVAL_MS)
   );
 
-  // Progress rollup for active searches.
+  // Progress rollup for active searches. Non-reentrant: a slow tick must not overlap the next
+  // (overlapping ticks could re-observe a just-completed search and double-schedule the chain).
+  let rollupRunning = false;
   timers.push(
     setInterval(async () => {
+      if (rollupRunning) return;
+      rollupRunning = true;
       try {
         const active = await DeepSearch.find({
           status: { $in: ['in_progress', 'paused'] },
@@ -45,7 +49,12 @@ function startManager(io) {
 
         for (const s of active) {
           const res = await taskQueue.rollupSearch(s._id);
-          if (!res || !io) continue;
+          if (!res) continue;
+          // Chain the next day's search regardless of socket availability.
+          if (res.status === 'completed') {
+            await taskQueue.scheduleNextChainedSearch(s._id);
+          }
+          if (!io) continue;
           const pct = res.progress.totalBuckets
             ? Math.round(((res.progress.done + res.progress.dead) / res.progress.totalBuckets) * 100)
             : 0;
@@ -64,8 +73,26 @@ function startManager(io) {
             });
           }
         }
+
+        // Start any chained searches whose 5-minute delay has elapsed (crash-safe).
+        const startedChained = await taskQueue.startDueChainedSearches();
+        for (const search of startedChained) {
+          logger.info(`[manager] chained auto-start: ${search.searchId}`);
+          if (io) {
+            io.emit('deep-search:progress', {
+              searchId: search.searchId,
+              status: 'in_progress',
+              usersFound: 0,
+              bucketsProcessed: 0,
+              totalBuckets: search.totalBuckets || 0,
+              percentage: 0,
+            });
+          }
+        }
       } catch (e) {
         logger.error(`[manager] rollup error: ${e.message}`);
+      } finally {
+        rollupRunning = false;
       }
     }, ROLLUP_INTERVAL_MS)
   );
