@@ -81,7 +81,9 @@ async function generateTasksForSearch(search) {
   const total = await Task.countDocuments({ searchId: search._id, type: 'deep-search-bucket' });
   await DeepSearch.updateOne(
     { _id: search._id },
-    { $set: { totalBuckets: total, 'progress.totalBuckets': total } }
+    // Reset chainScheduled on every (re)generation = every start, so the per-completion chain
+    // guard is scoped to THIS run (a future re-run can chain its successor again).
+    { $set: { totalBuckets: total, 'progress.totalBuckets': total, chainScheduled: false } }
   );
   await events.emit({
     type: 'manager.generate',
