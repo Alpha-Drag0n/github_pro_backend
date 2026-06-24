@@ -268,6 +268,13 @@ function buildDeepUserFilter(q) {
     else if (v === 'no') and.push({ $nor: [cond] });
   }
 
+  // Manual outreach flags: markedUS / sent = 'yes' | 'no'. `$ne: true` treats a
+  // missing/false flag as "no" so legacy users (no outreach sub-document) filter correctly.
+  if (q.markedUS === 'yes') and.push({ 'outreach.markedUS': true });
+  else if (q.markedUS === 'no') and.push({ 'outreach.markedUS': { $ne: true } });
+  if (q.sent === 'yes') and.push({ 'outreach.sent': true });
+  else if (q.sent === 'no') and.push({ 'outreach.sent': { $ne: true } });
+
   return { $and: and };
 }
 
@@ -587,6 +594,57 @@ router.patch('/deep-searches/users/:id/rocketreach-location', async (req, res) =
 });
 
 /**
+ * Toggle manual outreach flags on a deep-search user.
+ * PATCH /api/deep-searches/users/:id/flags
+ * Body: { markedUS?: boolean, sent?: boolean } — send only the flag(s) you want to change.
+ * Each flag's *At timestamp is set when it flips on and cleared when it flips off.
+ * Declared before '/deep-searches/:id' so "users" isn't read as a search id.
+ */
+router.patch('/deep-searches/users/:id/flags', async (req, res) => {
+  try {
+    const { markedUS, sent } = req.body || {};
+    const set = {};
+    if (typeof markedUS === 'boolean') {
+      set['outreach.markedUS'] = markedUS;
+      set['outreach.markedUSAt'] = markedUS ? new Date() : null;
+    }
+    if (typeof sent === 'boolean') {
+      set['outreach.sent'] = sent;
+      set['outreach.sentAt'] = sent ? new Date() : null;
+    }
+    if (Object.keys(set).length === 0) {
+      return res.status(400).json({ error: 'Provide markedUS and/or sent as booleans' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { $set: set },
+      { new: true, runValidators: true }
+    );
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    requestLogService.logDBOperation(
+      'User.findByIdAndUpdate',
+      { userId: String(user._id), flags: Object.keys(set) },
+      'update',
+      0,
+      true,
+      null
+    );
+
+    res.json({
+      message: 'Flags updated',
+      userId: user._id,
+      username: user.username,
+      outreach: user.outreach,
+    });
+  } catch (error) {
+    logger.error(`Error updating user flags: ${error.message}`);
+    res.status(500).json({ error: 'Failed to update flags' });
+  }
+});
+
+/**
  * Create new iterative search
  * POST /api/deep-searches
  * Body: { fromDate, toDate }
@@ -784,7 +842,7 @@ router.get('/deep-searches/:id/overview', async (req, res) => {
     // Heuristic US match (not exact, but useful): "United States", "USA", "U.S.", or a ", US" suffix.
     const US_REGEX = 'united states|u\\.?s\\.?a\\.?|\\bus\\b';
 
-    const [total, withEmail, withLinkedin, withLinkedinUrl, enriched, found, locAgg] =
+    const [total, withEmail, withLinkedin, withLinkedinUrl, enriched, found, markedUSCount, sentCount, locAgg] =
       await Promise.all([
         User.countDocuments(scoped),
         withCond(PRESENCE_FIELDS.email),
@@ -792,6 +850,8 @@ router.get('/deep-searches/:id/overview', async (req, res) => {
         withCond(HAS_USABLE_LINKEDIN_URL),
         withCond(HAS_LINKEDIN_INFO),
         withCond(HAS_LINKEDIN_INFO_FOUND),
+        withCond({ 'outreach.markedUS': true }),
+        withCond({ 'outreach.sent': true }),
         User.aggregate([
           { $match: scoped },
           { $addFields: { chosenLoc: chosenLoc } },
@@ -821,6 +881,8 @@ router.get('/deep-searches/:id/overview', async (req, res) => {
       withLinkedinUrl,
       enriched,
       found,
+      markedUS: markedUSCount,
+      sent: sentCount,
       usCount: facet.us[0]?.count || 0,
       topLocations: (facet.top || []).map((l) => ({ location: l._id, count: l.count })),
     });

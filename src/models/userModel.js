@@ -211,6 +211,19 @@ const userSchema = new mongoose.Schema({
     ],
   },
 
+  // ========== Outreach marking (manual — set by the operator from the Deep Search UI) ==========
+  // Two independent manual flags toggled per profile from the Deep Search overview:
+  //   markedUS → operator has judged this profile to be US-based
+  //   sent     → outreach has been sent to this profile
+  // Kept in their own sub-document so they never mix with mined/enriched data. Each flag
+  // carries a timestamp recording when it was last flipped on (cleared when toggled off).
+  outreach: {
+    markedUS: { type: Boolean, default: false },
+    markedUSAt: Date,
+    sent: { type: Boolean, default: false },
+    sentAt: Date,
+  },
+
   // ========== Search Tracking ==========
   searchId: String, // Reference to the search that found this user
   foundIn: {
@@ -253,6 +266,8 @@ userSchema.index({ 'repositoryMining.locations.location': 1 });
 userSchema.index({ 'repositoryMining.miningInProgress': 1 });
 userSchema.index({ 'linkedinInfo.status': 1 });
 userSchema.index({ 'linkedinInfo.profiles.location.parsed.countryCode': 1 });
+userSchema.index({ 'outreach.markedUS': 1 });
+userSchema.index({ 'outreach.sent': 1 });
 
 // ========== Pre-save Hook for updatedAt ==========
 userSchema.pre('save', function (next) {
