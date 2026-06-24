@@ -126,9 +126,13 @@ router.get('/metrics/overview', wrap(async (req, res) => {
   const totalErr = arr(c4xx) + arr(c5xx) + arr(c429);
   const coolingTokens = await Token.countDocuments({ cooldownUntil: { $gt: new Date() } });
   const totalTokens = await Token.countDocuments({});
+  // Latest span overall (any kind) so the UI can flag empty windows and offer to
+  // jump to the last activity.
+  const lastSpan = await Span.findOne({}, { startTs: 1 }).sort({ startTs: -1 }).lean();
 
   res.json({
     range: R.key,
+    lastActivityTs: lastSpan ? new Date(lastSpan.startTs).getTime() : null,
     series: { labels, github: { p50, p95, p99, ok, c4xx, c5xx, c429, rpm }, queue: { done, failed, pending, leased }, wait },
     kpis: {
       tasksDone: arr(done),
