@@ -1,40 +1,16 @@
 /**
  * Logger Utility
- * Handles logging to console and files
+ * Logs to the console only. Persistent logs live in the database (requestLog / healthLog /
+ * agent events collections), so nothing is written to disk.
  */
 
-const fs = require('fs');
-const path = require('path');
-
 class Logger {
-  constructor() {
-    this.logDir = path.join(__dirname, '../../logs');
-    this.ensureLogDir();
-    this.logFile = path.join(this.logDir, `search-${new Date().toISOString().split('T')[0]}.log`);
-  }
-
-  ensureLogDir() {
-    if (!fs.existsSync(this.logDir)) {
-      fs.mkdirSync(this.logDir, { recursive: true });
-    }
-  }
-
   getTimestamp() {
     return new Date().toISOString();
   }
 
   log(level, message) {
-    const timestamp = this.getTimestamp();
-    const formatted = `[${timestamp}] [${level}] ${message}`;
-
-    console.log(formatted);
-
-    // Write to file
-    try {
-      fs.appendFileSync(this.logFile, formatted + '\n');
-    } catch (error) {
-      console.error('Error writing to log file:', error.message);
-    }
+    console.log(`[${this.getTimestamp()}] [${level}] ${message}`);
   }
 
   info(message) {
@@ -51,10 +27,6 @@ class Logger {
 
   debug(message) {
     this.log('DEBUG', message);
-  }
-
-  getLogFile() {
-    return this.logFile;
   }
 }
 
