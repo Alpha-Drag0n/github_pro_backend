@@ -201,6 +201,17 @@ function mergeUser(rawDocs) {
   const hasDeep = docs.some((d) => (d.searchIterationHistory || []).length > 0);
   const hasQuick = docs.some((d) => !((d.searchIterationHistory || []).length > 0));
 
+  // Manual outreach marks are stored per-record; a username spans several records, so a
+  // mark counts if ANY record carries it (most-recent timestamp surfaced for display).
+  const latestOutreachAt = (field) =>
+    docs.map((d) => d.outreach?.[field]).filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || null;
+  const outreach = {
+    markedUS: docs.some((d) => d.outreach?.markedUS),
+    sent: docs.some((d) => d.outreach?.sent),
+    markedUSAt: latestOutreachAt('markedUSAt'),
+    sentAt: latestOutreachAt('sentAt'),
+  };
+
   return {
     username: docs[0].username,
     status: 'found',
@@ -232,6 +243,7 @@ function mergeUser(rawDocs) {
     socialProfiles,
     locationInfo,
     linkedinInfo: mergeLinkedin(docs),
+    outreach,
   };
 }
 
