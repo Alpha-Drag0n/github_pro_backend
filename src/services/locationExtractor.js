@@ -1,12 +1,12 @@
 /**
- * Location Extractor — pull self-reported location from free text (profile bio,
+ * Location Extractor - pull self-reported location from free text (profile bio,
  * repo READMEs/descriptions). Three tiers, combined for precision + recall:
  *
- *   1. MARKERS (high)   — explicit cues ("📍", "Based in", flag emoji, "Location:",
+ *   1. MARKERS (high)   - explicit cues ("📍", "Based in", flag emoji, "Location:",
  *                          resume "Address:") tell us WHERE to look; compromise then
  *                          confirms WHAT the place is.
- *   2. FLAG EMOJI (high)— 🇩🇪 etc. decoded to a country via Intl.DisplayNames.
- *   3. NER (medium/low) — compromise's place lexicon (#City / #Country) catches
+ *   2. FLAG EMOJI (high)- 🇩🇪 etc. decoded to a country via Intl.DisplayNames.
+ *   3. NER (medium/low) - compromise's place lexicon (#City / #Country) catches
  *                          unlabeled mentions. Country = medium; bare city = low
  *                          (could be travel/infra context, so it's flagged low).
  *
@@ -25,7 +25,7 @@ const regionNames = (() => {
   }
 })();
 
-// Cues that precede a self-reported location. (Deliberately NOT a bare "from" — too noisy.)
+// Cues that precede a self-reported location. (Deliberately NOT a bare "from" - too noisy.)
 const MARKER_RE =
   /(?:📍|🌍|🌎|🌏|📌|🏡|🏠|🗺️?|based\s+(?:in|out\s+of)|located\s+in|i\s+live\s+in|living\s+in|lives?\s+in|location\s*[:\-=]+|home\s*town\s*[:\-=]*|address\s*[:\-=]+|city\s*[:\-=]+|currently\s+(?:in|living\s+in)|hailing\s+from|originally\s+from)\s*[:\-]?\s*([^\n\r;|·•<>()[\]{}]{2,60})/gi;
 
@@ -39,7 +39,7 @@ function clean(s) {
     .trim();
 }
 
-// Chars of each text block fed to NLP / codepoint scans. 0 = NO cap — the FULL README is
+// Chars of each text block fed to NLP / codepoint scans. 0 = NO cap - the FULL README is
 // passed through NLP (the default). On tiny hosts where a huge README's NLP pass blocks the
 // event loop / delays heartbeats, set LOCATION_NLP_MAX_CHARS to bound it.
 const NLP_CAP = parseInt(process.env.LOCATION_NLP_MAX_CHARS || '0', 10);
@@ -70,7 +70,7 @@ function flagsToCountries(text) {
   return out;
 }
 
-/** Split a place value into city/country coherently — derived from the value ITSELF only. */
+/** Split a place value into city/country coherently - derived from the value ITSELF only. */
 function classify(value) {
   if (value.includes(',')) {
     const parts = value.split(',').map(clean).filter(Boolean);
@@ -82,7 +82,7 @@ function classify(value) {
 /**
  * Find the place in a short phrase and derive city/country from THAT place only (so the
  * fields stay coherent). `tagged` is true only when compromise recognized a real place token
- * (#City/#Country) — used to reject non-place fragments like a street "123 Main St".
+ * (#City/#Country) - used to reject non-place fragments like a street "123 Main St".
  */
 function placeOf(phrase) {
   const doc = nlp(phrase);

@@ -63,7 +63,7 @@ async function assignTokenForSearch(searchId) {
   const token = tokens[index];
   assign(sid, token);
   logger.warn(
-    `All tokens in use — search ${sid} shares token ${token.name} (index ${index + 1}/${tokens.length})`
+    `All tokens in use - search ${sid} shares token ${token.name} (index ${index + 1}/${tokens.length})`
   );
   return token;
 }

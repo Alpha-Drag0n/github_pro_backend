@@ -8,7 +8,7 @@
  * Why merge? The collection's only unique constraint is the COMPOUND index
  * { username, searchId } (userModel.js), so the SAME GitHub username is stored as
  * a SEPARATE document for every search that found it. Different searches carry
- * different enrichment — Quick Search contributes emails / emailMetadata / readme,
+ * different enrichment - Quick Search contributes emails / emailMetadata / readme,
  * Deep Search contributes contactInfo / socialProfiles / locationInfo / linkedinInfo.
  * To answer "show me this user" we gather every document for the username and union
  * them into a single, most-complete record. Nothing is fetched from GitHub.
@@ -275,7 +275,7 @@ async function lookupUsernames(input) {
     docs = docs.concat(more);
   }
 
-  // De-dupe documents by _id (defensive — fast path + fallback shouldn't overlap).
+  // De-dupe documents by _id (defensive - fast path + fallback shouldn't overlap).
   const byId = new Map();
   for (const d of docs) byId.set(String(d._id), d);
   docs = Array.from(byId.values());

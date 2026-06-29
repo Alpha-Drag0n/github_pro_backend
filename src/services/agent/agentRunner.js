@@ -1,5 +1,5 @@
 /**
- * Agent runner — the generic claim → run → finalize loop.
+ * Agent runner - the generic claim → run → finalize loop.
  *
  * The same loop runs in-process (Phase 0, started by the manager) or as a separate
  * process (Phase 1, src/agent.js). It is handler-agnostic: it looks up
@@ -110,7 +110,7 @@ async function startAgent(opts = {}) {
     }
 
     // Parent job must exist and be running; otherwise release and skip. A missing
-    // parent (search deleted while this task was in-flight) is treated as canceled —
+    // parent (search deleted while this task was in-flight) is treated as canceled -
     // critically this prevents running the handler with searchUuid=undefined, which
     // would corrupt the User dedup/unique key.
     const parent = await DeepSearch.findById(task.searchId).select('control.desired searchId');
@@ -170,7 +170,7 @@ async function startAgent(opts = {}) {
       clearTimeout(watchdog);
 
       if (result?.aborted || leaseLost) {
-        // Abort (lost lease / paused / capacity) — release without burning an attempt.
+        // Abort (lost lease / paused / capacity) - release without burning an attempt.
         await taskQueue.releaseTask(task._id, agentId, task.leaseEpoch, 'pending', true);
       } else {
         await taskQueue.completeTask(
@@ -210,7 +210,7 @@ async function startAgent(opts = {}) {
         // via shouldAbort and the task returns to 'pending') and stop claiming. Render's
         // SIGTERM then becomes a backstop rather than the trigger.
         if (superseded) {
-          logger.info(`[agent ${agentId}] superseded by a newer instance — draining`);
+          logger.info(`[agent ${agentId}] superseded by a newer instance - draining`);
           break;
         }
         if (control.command === 'stop') break;

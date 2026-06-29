@@ -26,7 +26,7 @@ Everything else is left untouched: `profiles` (login!), `tokens`, `apifytokens`,
 ```bash
 cd backend
 
-# one pass, DELETE nothing — verify the files first
+# one pass, DELETE nothing - verify the files first
 npm run drain -- --uri "mongodb+srv://USER:PASS@cluster.mongodb.net/github-user-research" --once --dry-run
 
 # one real pass (export + delete)
@@ -71,15 +71,15 @@ compact (one doc per line). Import in Compass: *Collection → Add Data → Impo
   quarantined as `*.UNVERIFIED.json`. Disable with `--no-verify`.
 - A crash at worst re-exports one part next run (a few duplicate docs in a new file, never a
   loss). Leftover `*.tmp` files are cleaned at the next run's start.
-- `--dry-run` writes (and verifies) files but deletes nothing — always do one first on a new
+- `--dry-run` writes (and verifies) files but deletes nothing - always do one first on a new
   cluster. Note: dry-run files stay on disk while their docs stay online, so the next real run
   re-exports them; delete dry-run files first or use `--out ./data_dryrun`.
 
 ## Watch mode & network errors
 
 In `--watch`, a **clean** run is followed by `--interval` seconds (default 300). A **failed**
-run (e.g. a network drop / Atlas unreachable) retries fast — `--retry-interval` seconds
-(default 5) with exponential backoff up to 60s — instead of waiting the full interval. Once a
+run (e.g. a network drop / Atlas unreachable) retries fast - `--retry-interval` seconds
+(default 5) with exponential backoff up to 60s - instead of waiting the full interval. Once a
 run succeeds, the cadence resets to `--interval`. A failed *startup* connect in watch mode also
 retries (the watcher won't die on a blip). One-shot (`--once`) still fails fast.
 

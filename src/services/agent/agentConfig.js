@@ -3,7 +3,7 @@
  * Centralized so the manager (reaper / generation) and agents agree on timing.
  *
  * Token rotation is handled in the deep-search handler: on a token error the failing token
- * is cooled and excluded, and the call rotates to a DISTINCT not-yet-tried token — at most
+ * is cooled and excluded, and the call rotates to a DISTINCT not-yet-tried token - at most
  * once per token (N tokens → ≤ N attempts), never re-selecting a token that already failed.
  */
 module.exports = {

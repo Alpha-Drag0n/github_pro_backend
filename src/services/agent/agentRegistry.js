@@ -1,5 +1,5 @@
 /**
- * Agent registry — register agents, accept heartbeats, expose the control channel,
+ * Agent registry - register agents, accept heartbeats, expose the control channel,
  * and let the manager reap dead agents.
  *
  * The heartbeat is the single liveness signal: agents call `heartbeat()` every
@@ -20,7 +20,7 @@ async function register({ agentId, host, pid, version, capabilities, instanceId 
       // instanceId is set on EVERY (re)register: a newer deploy claiming the same agentId
       // overwrites it, which is how the older instance learns it has been superseded.
       $set: { host, pid, version, capabilities, instanceId, status: 'idle', lastHeartbeat: now },
-      // Initialize the control channel ONLY on first insert — a re-register (restart/
+      // Initialize the control channel ONLY on first insert - a re-register (restart/
       // reconnect with a reused agentId) must not clobber a pending manager command.
       $setOnInsert: {
         startedAt: now,

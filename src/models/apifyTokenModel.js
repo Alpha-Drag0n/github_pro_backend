@@ -43,7 +43,7 @@ const apifyTokenSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
-  // Counters — every LinkedIn enrichment run increments these.
+  // Counters - every LinkedIn enrichment run increments these.
   usageCount: { type: Number, default: 0 }, // total actor runs made with this token
   profilesEnriched: { type: Number, default: 0 }, // total LinkedIn URLs successfully resolved
   successCount: { type: Number, default: 0 },

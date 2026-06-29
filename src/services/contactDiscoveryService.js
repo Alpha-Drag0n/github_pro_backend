@@ -4,7 +4,7 @@
  * Deep contact/social extraction for a GitHub account: scans the profile text AND every
  * (non-fork) repository's description and full raw README, extracts contacts and social
  * profiles, and records the EXACT source URL for each finding (the README's blob URL, or
- * the repository URL for a description). Nothing in the README is skipped — the raw markdown
+ * the repository URL for a description). Nothing in the README is skipped - the raw markdown
  * (including HTML comments and hidden <details> blocks) is fed to the extractor.
  */
 
@@ -39,7 +39,7 @@ async function discoverContacts(client, username, opts = {}) {
   let activeClient = client;
   const isTokenError = (e) => [401, 403, 429].includes(e?.response?.status);
   // Per-call rotation cap: rotate to dodge a rate-limited token, but don't stall the whole
-  // search on one repo if every token is throttled — skip it and move on.
+  // search on one repo if every token is throttled - skip it and move on.
   const MAX_ROTATIONS = 8;
 
   // Run a GitHub call, rotating the token and retrying on auth/rate-limit errors.

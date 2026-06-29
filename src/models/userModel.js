@@ -22,7 +22,7 @@ const userSchema = new mongoose.Schema({
   blog: String,
   publicEmail: String, // GitHub profile's public email field (structured; distinct from mined emails)
   twitter_username: String, // GitHub profile's dedicated X/Twitter handle (structured)
-  location: String, // From GitHub profile (verbatim) — kept for backward compatibility
+  location: String, // From GitHub profile (verbatim) - kept for backward compatibility
   // Structured location: the profile location AND locations self-reported in repo
   // READMEs/descriptions, each with the exact source URL, how it was found, and confidence.
   locationInfo: {
@@ -38,7 +38,7 @@ const userSchema = new mongoose.Schema({
       },
     ],
     best: String, // resolved single value (profile if present, else best discovered)
-    // RocketReach enrichment — location resolved from the user's LinkedIn URL via the
+    // RocketReach enrichment - location resolved from the user's LinkedIn URL via the
     // RocketReach Chrome extension. Kept isolated from `discovered[]` so it never mixes
     // with repo-mined data and can be displayed/exported on its own.
     rocketreach: {
@@ -211,7 +211,7 @@ const userSchema = new mongoose.Schema({
     ],
   },
 
-  // ========== Outreach marking (manual — set by the operator from the Deep Search UI) ==========
+  // ========== Outreach marking (manual - set by the operator from the Deep Search UI) ==========
   // Two independent manual flags toggled per profile from the Deep Search overview:
   //   markedUS → operator has judged this profile to be US-based
   //   sent     → outreach has been sent to this profile

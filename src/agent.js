@@ -1,5 +1,5 @@
 /**
- * Agent entry point (Phase 1) — run search agents as a standalone process:
+ * Agent entry point (Phase 1) - run search agents as a standalone process:
  *   npm run agent            # one agent
  *   AGENT_COUNT=4 npm run agent
  *
@@ -41,7 +41,7 @@ async function main() {
   }
   logger.info(`Started ${agents.length} agent(s) in this process`);
 
-  // Minimal health server — lets the agent run as a host that needs an open port /
+  // Minimal health server - lets the agent run as a host that needs an open port /
   // health check, and gives the keep-alive (and any uptime monitor) something to ping.
   const healthServer = http.createServer((req, res) => {
     const url = (req.url || '').split('?')[0];
@@ -71,7 +71,7 @@ async function main() {
   });
 
   const shutdown = async (signal) => {
-    logger.info(`Received ${signal} — draining agents...`);
+    logger.info(`Received ${signal} - draining agents...`);
     stopSelfKeepAlive();
     healthServer.close();
     await Promise.all(agents.map((a) => a.stop().catch(() => {})));

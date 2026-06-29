@@ -129,7 +129,7 @@ router.patch('/tokens/:id', async (req, res) => {
       token.isActive = isActive;
       if (isActive) {
         // Re-enabling also lifts an auto-quarantine (401 → disabled) and any active cooldown,
-        // and resets the error streak — so the token actually re-enters the agent rotation.
+        // and resets the error streak - so the token actually re-enters the agent rotation.
         token.disabled = false;
         token.cooldownUntil = null;
         token.consecutiveErrors = 0;

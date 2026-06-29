@@ -1,5 +1,5 @@
 /**
- * Metrics / Observability API — aggregates the `spans` collection (plus Task,
+ * Metrics / Observability API - aggregates the `spans` collection (plus Task,
  * Agent, Token) into the time-series the Monitoring page renders. Mounted under
  * /api (protected). Read-only.
  *
@@ -211,7 +211,7 @@ router.get('/metrics/traces', wrap(async (req, res) => {
       usersFound: (r.attr && (r.attr.usersFound != null ? r.attr.usersFound : r.attr.usersNew)) || 0,
       usersSaved: (r.attr && r.attr.usersNew) || 0,
       contacts: 0,
-      tokenName: r.tokenId ? String(r.tokenId) : '—',
+      tokenName: r.tokenId ? String(r.tokenId) : '-',
       githubCount: (m[r.traceId] && m[r.traceId].github) || 0,
       dbCount: (m[r.traceId] && m[r.traceId].db) || 0,
       waitedMs: (m[r.traceId] && m[r.traceId].waitMs) || 0,

@@ -30,7 +30,7 @@ const PROFILE_FETCH_DELAY_MS = 120; // Be gentle on the rate limit between profi
 const DAY_MS = 1000 * 60 * 60 * 24;
 const ALNUM = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
-// Token rotation (mirrors the regular search worker). Rotation retries indefinitely —
+// Token rotation (mirrors the regular search worker). Rotation retries indefinitely -
 // a token/rate-limit/transient error never fails the search; only a user pause/delete stops it.
 const TOKEN_ROTATION_DELAY_MS = 500;
 const TOKEN_STANDBY_POLL_MS = 30000;
@@ -72,7 +72,7 @@ class IterativeSearchService {
     const accountType = 'user';
     const terms = this.generateTerms(search.termSet || 'alnum2');
 
-    // Mutable per-run context — `token`/`client` are swapped in place on rotation.
+    // Mutable per-run context - `token`/`client` are swapped in place on rotation.
     const ctx = {
       searchId,
       search,
@@ -128,7 +128,7 @@ class IterativeSearchService {
             excludedLocations: [],
             completedAt: new Date(),
             duration: 0,
-            error: `Skipped — bucket already processed by search ${finishedElsewhere.searchId}`,
+            error: `Skipped - bucket already processed by search ${finishedElsewhere.searchId}`,
           });
           await this.advanceBucket({ search, io, createdDate, term, created: 0 });
           continue;
@@ -161,7 +161,7 @@ class IterativeSearchService {
           return { status: 'failed', usersFound: search.usersFound || 0 };
         }
 
-        // The bucket may have been paused/deleted mid-processing — re-check before marking
+        // The bucket may have been paused/deleted mid-processing - re-check before marking
         // it finished, so we don't clobber a 'paused' status or record a partial bucket.
         const afterBucket = await DeepSearch.findById(search._id).select('status');
         if (!afterBucket || afterBucket.status !== 'in_progress') {
@@ -181,14 +181,14 @@ class IterativeSearchService {
         await this.advanceBucket({ search, io, createdDate, term, created: bucketCreated });
       }
 
-      // Whole day complete (all terms) — bump the day counter for display.
+      // Whole day complete (all terms) - bump the day counter for display.
       const liveAfterDay = await DeepSearch.findById(search._id).select('status');
       if (!liveAfterDay || liveAfterDay.status !== 'in_progress') {
         return { status: liveAfterDay ? liveAfterDay.status : 'deleted', usersFound: search.usersFound || 0 };
       }
       search.daysProcessed = (search.daysProcessed || 0) + 1;
       await search.save();
-      logger.info(`[DeepSearch] ${searchId} day ${createdDate} complete — ${search.daysProcessed}/${search.totalDays} days`);
+      logger.info(`[DeepSearch] ${searchId} day ${createdDate} complete - ${search.daysProcessed}/${search.totalDays} days`);
     }
 
     search.status = 'completed';
@@ -203,7 +203,7 @@ class IterativeSearchService {
       bucketsProcessed: search.bucketsProcessed,
     });
 
-    logger.info(`[DeepSearch] ${searchId} completed — ${search.usersFound} users found`);
+    logger.info(`[DeepSearch] ${searchId} completed - ${search.usersFound} users found`);
     return { status: 'completed', usersFound: search.usersFound };
   }
 
@@ -263,7 +263,7 @@ class IterativeSearchService {
 
   /**
    * Fetch full profiles for search results and upsert them as users linked to this search.
-   * Returns { locations, created } — discovered locations (for exclusion) and new-user count.
+   * Returns { locations, created } - discovered locations (for exclusion) and new-user count.
    */
   async saveResults(ctx, { results, iteration, excludedLocations }) {
     const { search } = ctx;
@@ -323,7 +323,7 @@ class IterativeSearchService {
 
       // Deep contact/social discovery: scan profile + every (non-fork) repo's README and
       // description, recording the exact source URL for each finding. The service logs which
-      // repository each datum came from. Non-fatal — a user is still saved if it fails.
+      // repository each datum came from. Non-fatal - a user is still saved if it fails.
       let contactInfo;
       let socialProfiles;
       let locationInfo;
@@ -422,7 +422,7 @@ class IterativeSearchService {
       } catch (error) {
         const status = error.response?.status;
         if (status === 422) {
-          // Invalid query (e.g. too many exclusions) — treat as no more results.
+          // Invalid query (e.g. too many exclusions) - treat as no more results.
           logger.warn(`[DeepSearch] Invalid query, stopping pagination: ${query}`);
           break;
         }
@@ -454,7 +454,7 @@ class IterativeSearchService {
   /**
    * Run a user search that NEVER gives up on errors: on any failure it rotates to the next
    * token and tries again, around and around (with the pool's full-cycle cooldown), until it
-   * succeeds. The ONLY thing that stops it is the user pausing/deleting the search — in which
+   * succeeds. The ONLY thing that stops it is the user pausing/deleting the search - in which
    * case it returns [] so the caller unwinds cleanly. The search is never marked 'failed'
    * because of a token/rate-limit/transient error.
    */
@@ -473,7 +473,7 @@ class IterativeSearchService {
         attempt += 1;
         const status = error.response?.status || 'network';
         logger.warn(
-          `[DeepSearch] ${ctx.searchId} search error (attempt ${attempt}, ${status}): ${error.message} — switching token and retrying`
+          `[DeepSearch] ${ctx.searchId} search error (attempt ${attempt}, ${status}): ${error.message} - switching token and retrying`
         );
         const rotated = await this.rotateToken(ctx, `search ${status}: ${error.message}`);
         if (!rotated) {
@@ -504,7 +504,7 @@ class IterativeSearchService {
         if (this.isGitHubTokenError(error)) {
           const status = error.response?.status;
           logger.warn(
-            `[DeepSearch] ${ctx.searchId} profile ${status} for ${username} — switching token and retrying`
+            `[DeepSearch] ${ctx.searchId} profile ${status} for ${username} - switching token and retrying`
           );
           const rotated = await this.rotateToken(ctx, `profile ${status}: ${error.message}`);
           if (!rotated) {
@@ -512,7 +512,7 @@ class IterativeSearchService {
           }
           continue; // retry with the new token
         }
-        // Non-token error (e.g. 404 user not found) — give up on just this profile.
+        // Non-token error (e.g. 404 user not found) - give up on just this profile.
         logger.warn(`[DeepSearch] Could not fetch profile for ${username}: ${error.message}`);
         return null;
       }
@@ -546,7 +546,7 @@ class IterativeSearchService {
     }
 
     if (fullCycle) {
-      logger.info(`[DeepSearch] ${ctx.searchId} full token cycle — cooling down before retry`);
+      logger.info(`[DeepSearch] ${ctx.searchId} full token cycle - cooling down before retry`);
       await this.sleep(TOKEN_FULL_CYCLE_COOLDOWN_MS);
     } else {
       await this.sleep(TOKEN_ROTATION_DELAY_MS);
@@ -554,7 +554,7 @@ class IterativeSearchService {
 
     const nextDoc = await Token.findById(nextMeta._id);
     if (!nextDoc) {
-      // Token vanished mid-rotation — try once more from the wait path.
+      // Token vanished mid-rotation - try once more from the wait path.
       const waitedDoc = await this.waitForAvailableToken(ctx);
       if (!waitedDoc) {
         return false;
@@ -594,7 +594,7 @@ class IterativeSearchService {
         }
       }
 
-      logger.info(`[DeepSearch] ${ctx.searchId} awaiting an available token — retrying in ${TOKEN_STANDBY_POLL_MS / 1000}s`);
+      logger.info(`[DeepSearch] ${ctx.searchId} awaiting an available token - retrying in ${TOKEN_STANDBY_POLL_MS / 1000}s`);
       await this.sleep(TOKEN_STANDBY_POLL_MS);
     }
   }

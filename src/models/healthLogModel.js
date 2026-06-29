@@ -1,5 +1,5 @@
 /**
- * Health check history — alive / dead / degraded snapshots.
+ * Health check history - alive / dead / degraded snapshots.
  */
 
 const mongoose = require('mongoose');

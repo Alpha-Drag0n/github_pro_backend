@@ -123,7 +123,7 @@ app.get('*', (req, res) => {
   });
 });
 
-// WebSocket — require JWT (same as HTTP API)
+// WebSocket - require JWT (same as HTTP API)
 io.use(socketAuthMiddleware);
 
 io.on('connection', (socket) => {

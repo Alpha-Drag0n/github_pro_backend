@@ -1,18 +1,18 @@
 /**
- * tracing.js — the workflow tracing engine.
+ * tracing.js - the workflow tracing engine.
  *
  * Captures a per-task TRACE made of nested SPANS and writes them to the `spans`
  * collection (see models/spanModel.js). Designed around four cheap chokepoints:
- *   1. withTrace()   — wraps handler.run → the root task span (agentRunner.js)
- *   2. instrumentGithubAxios() — one axios interceptor → every GitHub request
+ *   1. withTrace()   - wraps handler.run → the root task span (agentRunner.js)
+ *   2. instrumentGithubAxios() - one axios interceptor → every GitHub request
  *   3. dbPlugin (global mongoose plugin) → every DB read/write inside a trace
- *   4. withSpan()    — wraps a business function (location/contact/etc.)
+ *   4. withSpan()    - wraps a business function (location/contact/etc.)
  *
  * Context flows implicitly via AsyncLocalStorage, so child code emits correctly
  * parented spans WITHOUT threading a ctx object everywhere.
  *
  * SAFETY (this runs in the hot path):
- *   - Everything is fire-and-forget and wrapped in try/catch — tracing must
+ *   - Everything is fire-and-forget and wrapped in try/catch - tracing must
  *     NEVER throw into or slow the work loop.
  *   - Spans are BUFFERED and bulk-inserted (mirrors requestLogService), never
  *     one awaited insert per event.
@@ -288,7 +288,7 @@ function instrumentGithubAxios(instance, staticMeta = {}) {
 }
 
 /* ------------------------------------------------------------------ *
- * DB instrumentation (chokepoint #3) — global mongoose plugin
+ * DB instrumentation (chokepoint #3) - global mongoose plugin
  * ------------------------------------------------------------------ */
 const DB_QUERY_OPS = [
   'count', 'countDocuments', 'estimatedDocumentCount', 'find', 'findOne',
@@ -315,7 +315,7 @@ function recordDbSpan(ctx, start, err, result, forcedOp) {
   if (!collection) {
     if (!collectionResolveWarned) {
       collectionResolveWarned = true;
-      logger.warn('[tracing] could not resolve a collection name for a DB op — some db spans may be missing');
+      logger.warn('[tracing] could not resolve a collection name for a DB op - some db spans may be missing');
     }
     return;
   }

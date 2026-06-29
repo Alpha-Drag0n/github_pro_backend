@@ -1,5 +1,5 @@
 /**
- * Agent & Task management API — powers the monitoring dashboard and the
+ * Agent & Task management API - powers the monitoring dashboard and the
  * Agent / Task management pages (force-assign, priority, pause/stop, retry).
  * Mounted under /api (protected).
  */

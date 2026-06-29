@@ -14,8 +14,8 @@ const {
 
 const logger = new Logger();
 
-const SHUTDOWN_MESSAGE = 'Interrupted by server shutdown — resume to continue';
-const RESTART_MESSAGE = 'Recovered after unexpected restart — resume to continue';
+const SHUTDOWN_MESSAGE = 'Interrupted by server shutdown - resume to continue';
+const RESTART_MESSAGE = 'Recovered after unexpected restart - resume to continue';
 
 function isAutoResumeEnabled() {
   return process.env.AUTO_RESUME_SEARCHES === 'true';
@@ -74,7 +74,7 @@ async function reconcileOrphanedSearches(io) {
  */
 async function autoResumeRecoverableSearches(io, executeSearchInBackground) {
   if (!isAutoResumeEnabled()) {
-    logger.info('AUTO_RESUME_SEARCHES is disabled — recoverable searches stay paused');
+    logger.info('AUTO_RESUME_SEARCHES is disabled - recoverable searches stay paused');
     return { resumed: 0, skipped: 0 };
   }
 

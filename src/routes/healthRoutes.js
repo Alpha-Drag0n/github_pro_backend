@@ -1,5 +1,5 @@
 /**
- * Service health check (public — not behind JWT auth).
+ * Service health check (public - not behind JWT auth).
  */
 
 const express = require('express');

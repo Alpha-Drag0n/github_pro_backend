@@ -14,7 +14,7 @@ class GitHubClient {
   /**
    * @param {string} token   GitHub PAT
    * @param {string} [searchId]  searchId (string) for request logging correlation
-   * @param {object} [meta]   { tokenId } — used to attribute tracing spans to a token
+   * @param {object} [meta]   { tokenId } - used to attribute tracing spans to a token
    */
   constructor(token, searchId = null, meta = {}) {
     if (!token) {
@@ -272,7 +272,7 @@ class GitHubClient {
   /**
    * Get a repository's README together with its exact source URL.
    * Uses the JSON form of the readme endpoint so we get the html_url (exact blob URL) and
-   * decode the full raw content (base64) — nothing is stripped, so HTML comments / hidden
+   * decode the full raw content (base64) - nothing is stripped, so HTML comments / hidden
    * <details> blocks are preserved for extraction.
    * @returns {Promise<{ content: string, htmlUrl: string, downloadUrl: string, path: string } | null>}
    */

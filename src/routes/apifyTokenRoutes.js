@@ -25,7 +25,7 @@ router.get('/apify-tokens', async (req, res) => {
 
 /**
  * Add a new Apify token.
- * Body: { token, name, priority? } — verified against the Apify API before saving.
+ * Body: { token, name, priority? } - verified against the Apify API before saving.
  */
 router.post('/apify-tokens', async (req, res) => {
   try {
