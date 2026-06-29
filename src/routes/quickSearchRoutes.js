@@ -133,7 +133,7 @@ async function waitForAvailableToken(search, io) {
     }
 
     search.status = 'awaiting_tokens';
-    search.error = 'Waiting for a GitHub token — will retry automatically';
+    search.error = 'Waiting for a GitHub token - will retry automatically';
     await search.save();
     await notifySearchChange(io, search);
 
@@ -145,7 +145,7 @@ async function waitForAvailableToken(search, io) {
     }
 
     logger.info(
-      `Search ${search.searchId} awaiting tokens — polling again in ${TOKEN_STANDBY_POLL_MS / 1000}s`
+      `Search ${search.searchId} awaiting tokens - polling again in ${TOKEN_STANDBY_POLL_MS / 1000}s`
     );
     const continued = await sleepUnlessStopped(TOKEN_STANDBY_POLL_MS, search.searchId);
     if (!continued) {
@@ -177,7 +177,7 @@ async function rotateSearchToken(search, searchService, emailExtractor, currentT
   }
 
   if (fullCycle) {
-    logger.info(`Full token rotation cycle for search ${search.searchId} — cooling down before retry`);
+    logger.info(`Full token rotation cycle for search ${search.searchId} - cooling down before retry`);
     await sleep(TOKEN_FULL_CYCLE_COOLDOWN_MS);
   } else {
     await sleep(TOKEN_ROTATION_DELAY_MS);
@@ -303,7 +303,7 @@ router.post('/quick-searches/:id/execute', async (req, res) => {
     }
 
     if (isShuttingDown()) {
-      return res.status(503).json({ error: 'Server is shutting down — try again shortly' });
+      return res.status(503).json({ error: 'Server is shutting down - try again shortly' });
     }
 
     if (search.status === 'running' || hasActiveWorker(search.searchId)) {
@@ -322,7 +322,7 @@ router.post('/quick-searches/:id/execute', async (req, res) => {
     if (!selectedToken) {
       search.status = 'awaiting_tokens';
       search.error =
-        'No GitHub tokens in database yet — search will start automatically when one is added';
+        'No GitHub tokens in database yet - search will start automatically when one is added';
       await search.save();
       await notifySearchChange(req.io, search);
       logger.warn(`Search ${search.searchId} queued: awaiting tokens`);
@@ -508,7 +508,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
         if (existingLog?.status === 'in_progress') {
           logger.info(
-            `Resuming ${combo.location} ${combo.year} — previous run did not finish email extraction`
+            `Resuming ${combo.location} ${combo.year} - previous run did not finish email extraction`
           );
         }
 
@@ -682,7 +682,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
               search.searchId
             );
             logger.debug(
-              `Saved user: ${extractedData.username} — ${extractedData.emails.length} emails (commits/bio/readme), scanned ${repositoriesChecked} repos for contacts`
+              `Saved user: ${extractedData.username} - ${extractedData.emails.length} emails (commits/bio/readme), scanned ${repositoriesChecked} repos for contacts`
             );
             newUsersCount++;
 
@@ -782,7 +782,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
         if (isGitHubTokenError(comboError)) {
           const errorReason = `GitHub API error (${comboError.response?.status}): ${comboError.message}`;
           logger.warn(
-            `Token ${token.name} hit ${comboError.response?.status} — rotating to next token by createdAt`
+            `Token ${token.name} hit ${comboError.response?.status} - rotating to next token by createdAt`
           );
 
           const nextTokenDoc = await rotateSearchToken(
@@ -869,7 +869,7 @@ async function executeSearchInBackground(search, selectedToken, io) {
 
     if (isGitHubTokenError(error)) {
       search.status = 'awaiting_tokens';
-      search.error = 'Token rotation in progress — search will continue automatically';
+      search.error = 'Token rotation in progress - search will continue automatically';
       await search.save();
       await notifySearchChange(io, search);
 
@@ -1114,7 +1114,7 @@ router.post('/quick-searches/:id/resume', async (req, res) => {
     }
 
     if (isShuttingDown()) {
-      return res.status(503).json({ error: 'Server is shutting down — try again shortly' });
+      return res.status(503).json({ error: 'Server is shutting down - try again shortly' });
     }
 
     if (hasActiveWorker(search.searchId)) {
@@ -1134,7 +1134,7 @@ router.post('/quick-searches/:id/resume', async (req, res) => {
     let selectedToken = await SearchTokenPool.assignTokenForSearch(search.searchId);
     if (!selectedToken) {
       search.status = 'awaiting_tokens';
-      search.error = 'No GitHub tokens yet — will resume when a token is available';
+      search.error = 'No GitHub tokens yet - will resume when a token is available';
       search.resumedAt = new Date();
       await search.save();
       await notifySearchChange(req.io, search);
@@ -1145,7 +1145,7 @@ router.post('/quick-searches/:id/resume', async (req, res) => {
         id: search._id,
         searchId: search.searchId,
         status: search.status,
-        message: `Search resumed from ${previousStatus} — awaiting tokens`,
+        message: `Search resumed from ${previousStatus} - awaiting tokens`,
       });
     }
 
@@ -1417,7 +1417,7 @@ router.post('/users/filter', async (req, res) => {
       searchId,
       foundInLocation,
       foundInYear,
-      source, // 'quick' | 'deep' | 'all' — which engine found the user
+      source, // 'quick' | 'deep' | 'all' - which engine found the user
     } = req.body;
 
     // Build filter object

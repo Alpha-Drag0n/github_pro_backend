@@ -1,5 +1,5 @@
 /**
- * Event service — append-only structured logging for the agent system.
+ * Event service - append-only structured logging for the agent system.
  *
  * Fire-and-forget by design: logging must never break the work. Every write is
  * best-effort (errors are swallowed) and also mirrored to the normal logger.

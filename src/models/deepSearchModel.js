@@ -62,7 +62,7 @@ const iterativeSearchSchema = new mongoose.Schema({
 
   // ===== Agent system: control + rolled-up progress =====
   // The manager only ever writes a DESIRED state; agents converge to it. Agents no
-  // longer write this parent doc per bucket (that was a write hotspot, D6) — the
+  // longer write this parent doc per bucket (that was a write hotspot, D6) - the
   // manager's rollup loop recomputes `progress` from the tasks collection.
   control: {
     desired: { type: String, enum: ['run', 'paused', 'stopped'], default: 'run' },
@@ -75,7 +75,7 @@ const iterativeSearchSchema = new mongoose.Schema({
   // Auto-chaining: when a previous (earlier-dated) search completes, the next pending autoChain
   // search is scheduled to start at this time. The manager starts it once now >= autoStartAt.
   autoStartAt: { type: Date, default: null },
-  // Set once when THIS search's completion has already scheduled its successor — makes chaining
+  // Set once when THIS search's completion has already scheduled its successor - makes chaining
   // idempotent per completion, so overlapping rollup ticks can't double-schedule the chain.
   chainScheduled: { type: Boolean, default: false },
   progress: {

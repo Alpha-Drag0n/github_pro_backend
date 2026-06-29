@@ -2,7 +2,7 @@
  * Apify Service
  * Thin wrapper around the Apify REST API for LinkedIn profile enrichment.
  *
- * We talk to Apify over plain HTTP (axios — already a dependency) instead of the
+ * We talk to Apify over plain HTTP (axios - already a dependency) instead of the
  * `apify-client` SDK to keep the dependency surface small and consistent with
  * `githubClient`. The LinkedIn actor is invoked synchronously via
  * `run-sync-get-dataset-items`, which runs the actor and returns its dataset
@@ -18,7 +18,7 @@ const logger = new Logger();
 // LinkedIn profile-scraper actor. Input shape: { queries: [profileUrl, ...], countryFilter: [] }.
 const LINKEDIN_ACTOR_ID = process.env.APIFY_LINKEDIN_ACTOR_ID || 'MgJeZOsv2i4WkCqDy';
 const APIFY_BASE = 'https://api.apify.com/v2';
-// LinkedIn scraping is slow — allow generous time for a synchronous run.
+// LinkedIn scraping is slow - allow generous time for a synchronous run.
 const RUN_TIMEOUT_MS = parseInt(process.env.APIFY_RUN_TIMEOUT_MS, 10) || 300000;
 // Max profile URLs per actor run. Free Apify accounts return at most 15 results
 // per run, so we never send more than this in one call (override for paid plans).
@@ -26,7 +26,7 @@ const MAX_RESULTS_PER_RUN = parseInt(process.env.APIFY_MAX_RESULTS_PER_RUN, 10) 
 
 /**
  * Verify an Apify token by calling /users/me.
- * Returns { valid, username } — never throws.
+ * Returns { valid, username } - never throws.
  */
 async function verifyToken(token) {
   try {
@@ -44,7 +44,7 @@ async function verifyToken(token) {
 
 /**
  * Pick the active Apify token to use for a run.
- * Highest priority first, then oldest — so the SAME token is used for every run
+ * Highest priority first, then oldest - so the SAME token is used for every run
  * until it fails (Apify is credit-metered, not rate-limited, so there's no reason
  * to spread load). `excludeIds` skips tokens already disabled this run; `excludeEnv`
  * skips the env fallback once it has failed. Falls back to the APIFY_API_TOKEN env
@@ -110,7 +110,7 @@ function normalizeLinkedInUrl(url) {
 }
 
 /**
- * True if a stored value is a usable LinkedIn URL — actually hosted on linkedin.com
+ * True if a stored value is a usable LinkedIn URL - actually hosted on linkedin.com
  * (any scheme, with/without www. or a country subdomain) with a path. Host-anchored
  * via linkedInPath, so look-alikes (mylinkedin.com) and embedded URLs are rejected.
  */
@@ -120,7 +120,7 @@ function isLinkedInUrl(url) {
 
 /**
  * Every distinct usable LinkedIn URL on a user document, de-duplicated by PROFILE
- * IDENTITY (slug) — not by raw string — so two forms of the same profile
+ * IDENTITY (slug) - not by raw string - so two forms of the same profile
  * (e.g. `linkedin.com/in/foo` and `https://www.linkedin.com/in/foo`) collapse to one
  * and never become two Apify requests / two profile entries.
  */
@@ -150,7 +150,7 @@ function toQueryUrl(url) {
  * The identifying path of a LinkedIn URL, HOST-ANCHORED and reduced to the profile
  * identity segment. Both "https://linkedin.com/in/foo" and
  * "https://www.linkedin.com/in/foo/recent-activity/" yield "/in/foo". Returns '' for
- * anything not actually hosted on linkedin.com — so a "linkedin.com/in/x" embedded in
+ * anything not actually hosted on linkedin.com - so a "linkedin.com/in/x" embedded in
  * another host's URL (e.g. a tracking redirect) is rejected, not treated as a profile.
  * Ignores scheme, www./country subdomain, sub-paths, query, hash, case, trailing slash,
  * so two URLs for the SAME profile compare equal.
@@ -194,7 +194,7 @@ function sameLinkedInProfile(a, b) {
   return !!pa && pa === pb;
 }
 
-/** A "not found" profile entry — records the URL we tried, stores no profile data. */
+/** A "not found" profile entry - records the URL we tried, stores no profile data. */
 function notFoundProfile(queriedUrl) {
   return {
     sourceUrl: queriedUrl || null,
@@ -211,7 +211,7 @@ function notFoundProfile(queriedUrl) {
 /**
  * Map one RESOLVED Apify dataset row to a `linkedinInfo.profiles[]` entry. Callers
  * pass only rows that actually resolved (profileUrl + fullName present) and join them
- * to users by the profile-URL slug — so there is no positional/guess matching here.
+ * to users by the profile-URL slug - so there is no positional/guess matching here.
  * `sourceUrl` defaults to the canonical profileUrl; the caller overrides it with the
  * user's own queried URL.
  */
@@ -250,7 +250,7 @@ function mapItemToProfile(item) {
  *
  * Uses ONE token at a time (the highest-priority active one). If that token fails
  * with a token-dead error (bad token / exhausted credits), it is DISABLED and the
- * same chunk is retried on the next active token — i.e. tokens are consumed one by
+ * same chunk is retried on the next active token - i.e. tokens are consumed one by
  * one, not load-balanced. Transient errors (timeout, 5xx, rate limit) are NOT
  * blamed on the token and are surfaced to the caller without disabling it.
  */
@@ -286,13 +286,13 @@ async function runChunk(queries, opts) {
       return { tokenDoc, items };
     } catch (error) {
       if (isTokenFailure(error)) {
-        // This token is dead — disable it and fall through to the next one.
+        // This token is dead - disable it and fall through to the next one.
         await disableToken(tokenDoc, error.response?.data?.error?.message || error.message);
         if (tokenDoc._envOnly) triedEnv = true;
         else triedIds.push(tokenDoc._id);
         continue;
       }
-      // Transient / non-token error — keep the token, surface the failure.
+      // Transient / non-token error - keep the token, surface the failure.
       await recordTokenUsage(tokenDoc, { ok: false, reason: error.message });
       logger.error(`Apify LinkedIn enrichment failed (token "${tokenDoc.name || 'env'}"): ${error.message}`);
       throw error;
@@ -304,7 +304,7 @@ async function runChunk(queries, opts) {
  * Run the LinkedIn actor for a set of profile URLs and return mapped results.
  *
  * URLs are split into chunks of MAX_RESULTS_PER_RUN (15 on the free Apify plan) and
- * run sequentially, so a single run never exceeds the plan's per-run result cap —
+ * run sequentially, so a single run never exceeds the plan's per-run result cap -
  * regardless of how many URLs the caller passes (a user may have several). Each
  * chunk applies the token-failover above; results are merged.
  *
@@ -319,14 +319,14 @@ async function runChunk(queries, opts) {
  * @param {string[]} [opts.countryFilter] - actor countryFilter input
  * `queriedSlugs` is the set of profile slugs actually SENT to Apify (completed chunks).
  * If a later chunk fails after earlier ones succeeded, we KEEP the already-paid results
- * and return them — the caller persists only `queriedSlugs`, so already-charged profiles
- * are never re-sent on a retry. (If the very first chunk fails, we throw — nothing was
+ * and return them - the caller persists only `queriedSlugs`, so already-charged profiles
+ * are never re-sent on a retry. (If the very first chunk fails, we throw - nothing was
  * paid, so the users stay eligible and a re-run is not a double charge.)
  *
  * @returns {Promise<{ tokenDoc, byUrl: Map<identityPath, profile>, queriedSlugs: Set, raw: object[] }>}
  */
 async function enrichLinkedInProfiles(urls, opts = {}) {
-  // De-duplicate by PROFILE IDENTITY (slug), not raw string — so the same profile in
+  // De-duplicate by PROFILE IDENTITY (slug), not raw string - so the same profile in
   // different URL forms (across users or a single user) is sent to Apify exactly once.
   const seen = new Set();
   const cleanUrls = [];

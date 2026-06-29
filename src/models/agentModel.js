@@ -1,9 +1,9 @@
 /**
- * Agent Model — fleet registry, health, and the manager→agent control channel.
+ * Agent Model - fleet registry, health, and the manager→agent control channel.
  *
  * Each running agent owns one document. The agent UPDATES its own row (heartbeat,
  * status, metrics); the manager READS it for monitoring and WRITES `control` to
- * issue commands. Communication is entirely through MongoDB — no direct RPC.
+ * issue commands. Communication is entirely through MongoDB - no direct RPC.
  *
  * Liveness: the agent heartbeats unconditionally every HEARTBEAT_MS (alive signal,
  * idle or busy). The manager declares an agent `dead` when

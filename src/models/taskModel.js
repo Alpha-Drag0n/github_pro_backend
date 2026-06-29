@@ -1,9 +1,9 @@
 /**
- * Task Model — the durable work queue for the manager + agents pipeline.
+ * Task Model - the durable work queue for the manager + agents pipeline.
  *
  * One document = one smallest unit of work. For Deep Search that is a single
  * (day, term) bucket. The manager CREATES tasks; agents atomically CLAIM them
- * (pull model — the manager never pushes, except force-assign which pre-leases).
+ * (pull model - the manager never pushes, except force-assign which pre-leases).
  *
  * Lifecycle:  pending → leased → done | failed | dead | canceled | held
  *   pending  : waiting to be claimed

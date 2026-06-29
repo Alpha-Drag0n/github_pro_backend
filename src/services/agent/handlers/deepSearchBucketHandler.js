@@ -3,7 +3,7 @@
  *
  * Processes ONE (day, term) bucket: query GitHub with growing location exclusions
  * until results fall below the 1000 cap, fetch profiles, run contact/social
- * discovery, and upsert users linked to the search. Idempotent — re-running a
+ * discovery, and upsert users linked to the search. Idempotent - re-running a
  * partially-done bucket skips users already saved for the search.
  *
  * Token use: SEARCH calls are gated by the shared rate limiter (precise); CORE
@@ -43,7 +43,7 @@ const MAX_CAPACITY_WAIT_MS = 4 * 60_000; // don't squat a lease forever when all
 
 /**
  * Acquire a rate-limited token, waiting (with abort checks) until one is free.
- * Returns null on abort OR after MAX_CAPACITY_WAIT_MS of no capacity — in the latter
+ * Returns null on abort OR after MAX_CAPACITY_WAIT_MS of no capacity - in the latter
  * case it flags ctx.capacityAborted so the handler releases the task for a later retry
  * instead of holding the lease for the full per-task watchdog window.
  */
@@ -58,7 +58,7 @@ async function acquireOrWait(resource, ctx, excludeIds = []) {
       if (LOG_TOKEN_SELECTION) {
         console.log(`[token] agent ${ctx.agentId || '?'} → "${tok.name}" (${resource})`);
       }
-      // Only record when we actually had to wait — keeps the trace clean.
+      // Only record when we actually had to wait - keeps the trace clean.
       if (waited) {
         tracing.recordLeaf({
           name: 'token.wait', kind: 'token', start: waitStart, end: Date.now(),

@@ -1,5 +1,5 @@
 /**
- * Event Model — append-only structured log stream for the agent system.
+ * Event Model - append-only structured log stream for the agent system.
  *
  * Every meaningful step (by agents AND the manager) writes one event. This is the
  * audit trail and the data source for the monitoring UI. Correlation ids
@@ -29,7 +29,7 @@ const eventSchema = new mongoose.Schema({
   //  manager.reaper|rollup|generate   db.error
   type: { type: String, required: true, index: true },
 
-  // Correlation ids (sparse — only set when relevant).
+  // Correlation ids (sparse - only set when relevant).
   agentId: { type: String, default: null },
   taskId: { type: mongoose.Schema.Types.ObjectId, default: null },
   searchId: { type: mongoose.Schema.Types.ObjectId, default: null },

@@ -1,5 +1,5 @@
 /**
- * Token rate limiter — a SHARED, self-imposed central limiter so any number of
+ * Token rate limiter - a SHARED, self-imposed central limiter so any number of
  * agents can safely share a small pool of tokens (the user has few tokens).
  *
  * GitHub has two independent rate buckets that deep search hits:
@@ -10,7 +10,7 @@
  * has elapsed). If nothing is available the caller waits and retries.
  *
  * GitHub's x-ratelimit-* headers (which DO exist) are used only to reconcile the
- * local budget after a call — the local limiter is the primary control because a
+ * local budget after a call - the local limiter is the primary control because a
  * single agent's headers don't reflect other agents' usage in real time.
  */
 
@@ -76,7 +76,7 @@ async function acquire(resource = 'search', excludeIds = []) {
 /**
  * Reconcile a token's budget from GitHub response headers (best-effort).
  * MONOTONIC: `remaining` can only move DOWN (toward exhaustion) and `resetAt` only
- * FORWARD. This is essential — the header reflects one agent's view and is normally
+ * FORWARD. This is essential - the header reflects one agent's view and is normally
  * higher than our conservative local count; a blind $set would re-inflate the budget
  * and let the shared fleet overspend (violating the central-limiter invariant).
  */

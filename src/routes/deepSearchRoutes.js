@@ -51,7 +51,7 @@ async function launchIterativeSearch(search, io) {
 
   runningIterativeSearches.add(searchId);
 
-  // Run in background — do not await.
+  // Run in background - do not await.
   iterativeSearchService
     .runIterativeRangeSearch({ search, token: tokenDoc, io })
     .catch((error) => {
@@ -118,7 +118,7 @@ const PRESENCE_FIELDS = {
   email: { $or: [{ 'contactInfo.emails.0': { $exists: true } }, { 'emails.0': { $exists: true } }] },
   linkedin: { 'socialProfiles.linkedin.0': { $exists: true } },
   // A LinkedIn entry that actually carries a URL. The RocketReach extension uses `linkedinUrlHas=yes`
-  // (not `linkedinHas`) because it needs a real URL to look up — a handle-only entry is unusable and,
+  // (not `linkedinHas`) because it needs a real URL to look up - a handle-only entry is unusable and,
   // if counted, would never drain from the resume queue. Mirrors the client's `linkedin[0].url` read.
   linkedinUrl: { 'socialProfiles.linkedin.0.url': { $nin: [null, ''] } },
   x: { 'socialProfiles.x.0': { $exists: true } },
@@ -133,23 +133,23 @@ const PRESENCE_FIELDS = {
 };
 const HAS_PROFILE_LOCATION = { location: { $nin: [null, ''] } };
 const HAS_DISCOVERED_LOCATION = { 'locationInfo.discovered.0': { $exists: true } };
-// RocketReach enrichment state — used by the extension to resume large runs:
+// RocketReach enrichment state - used by the extension to resume large runs:
 //   rocketreachHas=no   → users never processed (no status at all)
-//   rocketreachFound=no → users without a found location (not_found OR never processed) — for retrying misses
+//   rocketreachFound=no → users without a found location (not_found OR never processed) - for retrying misses
 const HAS_ROCKETREACH = { 'locationInfo.rocketreach.status': { $nin: [null, ''] } };
 const HAS_ROCKETREACH_FOUND = { 'locationInfo.rocketreach.status': 'found' };
-// LinkedIn (Apify) enrichment state — used to resume/retry enrichment runs:
+// LinkedIn (Apify) enrichment state - used to resume/retry enrichment runs:
 //   linkedinInfoHas=no    → users never enriched (no status at all)
 //   linkedinInfoFound=no  → users without a resolved profile (not_found OR never enriched)
 const HAS_LINKEDIN_INFO = { 'linkedinInfo.status': { $nin: [null, ''] } };
 const HAS_LINKEDIN_INFO_FOUND = { 'linkedinInfo.status': 'found' };
 // A LinkedIn entry carrying an ENRICHABLE URL on ANY entry. Accepts every common
-// form — with/without scheme, with/without www. or a country subdomain — matching
+// form - with/without scheme, with/without www. or a country subdomain - matching
 // apifyService.isLinkedInUrl(). The `\b` before `linkedin` avoids look-alikes like
 // `mylinkedin.com`. Keeps the "unprocessed" count aligned with what we actually send.
 const HAS_USABLE_LINKEDIN_URL = {
   // Host-anchored: linkedin.com must be at the start, after `//`, or after a subdomain
-  // dot — so a linkedin.com path embedded in another host's URL isn't counted.
+  // dot - so a linkedin.com path embedded in another host's URL isn't counted.
   'socialProfiles.linkedin': { $elemMatch: { url: { $regex: '(^|//|\\.)linkedin\\.com/\\S+', $options: 'i' } } },
 };
 // Resolved "best" location values, for the have/best/not-have filters:
@@ -279,7 +279,7 @@ function buildDeepUserFilter(q) {
 }
 
 /**
- * Unified Deep Search results — users found across ALL deep searches, with detailed filters.
+ * Unified Deep Search results - users found across ALL deep searches, with detailed filters.
  * GET /api/deep-searches/users?page&limit&username&location&locationInfo&email&minFollowers&maxFollowers
  *   &locationHas|locationInfoHas = yes|no
  *   &emailHas|linkedinHas|xHas|facebookHas|instagramHas|youtubeHas|tiktokHas|discordHas|telegramHas|whatsappHas|phoneHas = yes|no
@@ -324,7 +324,7 @@ const MAX_LINKEDIN_BATCH = 100;
 
 /**
  * Run a batch of user docs through the Apify actor and persist results onto
- * `linkedinInfo`. A user may have SEVERAL LinkedIn URLs — every URL is checked and
+ * `linkedinInfo`. A user may have SEVERAL LinkedIn URLs - every URL is checked and
  * stored in `linkedinInfo.profiles[]`; `linkedinInfo.status` rolls up to 'found' if
  * any of them resolved. All URLs across all users go out in ONE actor run.
  * Returns { processed, found, notFound, skipped, results } (counts are per user).
@@ -358,7 +358,7 @@ async function enrichUserDocs(users) {
       continue;
     }
 
-    // Build one profile entry per sent URL. Match by profile-URL slug (linkedInPath) —
+    // Build one profile entry per sent URL. Match by profile-URL slug (linkedInPath) -
     // the actor reorders rows, so we can't rely on position.
     const profiles = sentUrls.map((u) => {
       const matched = byUrl.get(apifyService.linkedInPath(u));
@@ -430,8 +430,8 @@ router.get('/deep-searches/users/linkedin-stats', async (req, res) => {
  * Enrich deep-search users with LinkedIn profile data via the Apify actor.
  * POST /api/deep-searches/users/enrich-linkedin
  * Body (one of):
- *   { ids: [userId, ...] }        — enrich exactly these users (explicit selection)
- *   { filter: {...}, max?: 25 }   — enrich up to `max` UNPROCESSED users (have a URL,
+ *   { ids: [userId, ...] }        - enrich exactly these users (explicit selection)
+ *   { filter: {...}, max?: 25 }   - enrich up to `max` UNPROCESSED users (have a URL,
  *                                   no linkedinInfo yet) matching the given filter params;
  *                                   returns `remaining` so the UI can loop to drain the set.
  * Runs all selected URLs through Apify in ONE actor run. Declared before '/deep-searches/:id'.
@@ -596,7 +596,7 @@ router.patch('/deep-searches/users/:id/rocketreach-location', async (req, res) =
 /**
  * Toggle manual outreach flags on a deep-search user.
  * PATCH /api/deep-searches/users/:id/flags
- * Body: { markedUS?: boolean, sent?: boolean } — send only the flag(s) you want to change.
+ * Body: { markedUS?: boolean, sent?: boolean } - send only the flag(s) you want to change.
  * Each flag's *At timestamp is set when it flips on and cleared when it flips off.
  * Declared before '/deep-searches/:id' so "users" isn't read as a search id.
  */
@@ -798,7 +798,7 @@ router.get('/deep-searches/:id/users', async (req, res) => {
 });
 
 /**
- * Per-search overview metrics for the detail "view" page — a quick "shape of this
+ * Per-search overview metrics for the detail "view" page - a quick "shape of this
  * search's haul": coverage of email/LinkedIn, enrichment progress, and top locations.
  * GET /api/deep-searches/:id/overview
  */
@@ -942,7 +942,7 @@ router.post('/deep-searches/:id/start', async (req, res) => {
     }
 
     // Agent system: generate per-bucket tasks; the manager's agents drain the queue.
-    // (No token check here — agents wait on the shared rate limiter when tokens are busy.)
+    // (No token check here - agents wait on the shared rate limiter when tokens are busy.)
     search.status = 'in_progress';
     search.startedAt = new Date();
     search.pausedAt = null;
@@ -952,13 +952,13 @@ router.post('/deep-searches/:id/start', async (req, res) => {
 
     const totalBuckets = await taskQueue.generateTasksForSearch(search);
 
-    logger.info(`Deep search started: ${search.searchId} — ${totalBuckets} bucket tasks queued`);
+    logger.info(`Deep search started: ${search.searchId} - ${totalBuckets} bucket tasks queued`);
 
     res.json({
       searchId: search.searchId,
       status: search.status,
       totalBuckets,
-      message: 'Search started — tasks queued for agents',
+      message: 'Search started - tasks queued for agents',
     });
   } catch (error) {
     logger.error(`Error starting iterative search: ${error.message}`);
@@ -1048,7 +1048,7 @@ router.post('/deep-searches/:id/resume', async (req, res) => {
     res.json({
       searchId: search.searchId,
       status: 'in_progress',
-      message: 'Search resumed — tasks queued for agents',
+      message: 'Search resumed - tasks queued for agents',
     });
   } catch (error) {
     logger.error(`Error resuming iterative search: ${error.message}`);

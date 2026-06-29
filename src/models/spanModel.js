@@ -1,5 +1,5 @@
 /**
- * Span Model — dedicated tracing store for the agent workflow.
+ * Span Model - dedicated tracing store for the agent workflow.
  *
  * One document = one timed step (a "span"). Spans nest via parentSpanId to form
  * a per-task TRACE tree:
@@ -14,7 +14,7 @@
  * nested under it".
  *
  * RETENTION: spans are kept INDEFINITELY by default (no TTL). This collection is
- * high-volume, so it will grow without bound — prune/archive it yourself, or set
+ * high-volume, so it will grow without bound - prune/archive it yourself, or set
  * SPAN_TTL_DAYS to a positive number to auto-expire spans older than that many
  * days (e.g. SPAN_TTL_DAYS=30). 0 / unset = keep forever.
  *
@@ -45,7 +45,7 @@ const spanSchema = new mongoose.Schema(
 
     status: { type: String, enum: ['ok', 'error', 'aborted'], default: 'ok' },
 
-    // Correlation ids (sparse — pivot any of these to stitch a timeline).
+    // Correlation ids (sparse - pivot any of these to stitch a timeline).
     taskId: { type: mongoose.Schema.Types.ObjectId, default: null },
     agentId: { type: String, default: null },
     searchId: { type: mongoose.Schema.Types.ObjectId, default: null },

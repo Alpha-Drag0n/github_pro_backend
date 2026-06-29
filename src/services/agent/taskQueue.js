@@ -1,5 +1,5 @@
 /**
- * Task queue — the heart of the manager + agents pipeline.
+ * Task queue - the heart of the manager + agents pipeline.
  *
  * Manager side: generateTasksForSearch / reaper / rollup / control (pause/resume/
  * cancel/forceAssign/retry/priority).
@@ -175,7 +175,7 @@ async function completeTask(taskId, agentId, leaseEpoch, result, meta = {}) {
 
 /**
  * Fail a task (fenced): retryable → pending, or dead-letter if attempts exhausted.
- * The write and the resulting status are one atomic, fenced operation — a zombie
+ * The write and the resulting status are one atomic, fenced operation - a zombie
  * (lost-lease) caller gets null and emits nothing (true end-to-end no-op).
  */
 async function failTask(taskId, agentId, leaseEpoch, error) {
@@ -206,7 +206,7 @@ async function failTask(taskId, agentId, leaseEpoch, error) {
 }
 
 /**
- * Release a task back to a given status (fenced) — used by preempt/abort.
+ * Release a task back to a given status (fenced) - used by preempt/abort.
  * When the release is due to an abort (lease lost / capacity / pause), pass
  * restoreAttempt=true so the claim-time attempt increment is undone (a pure
  * capacity/abort wait should not burn the retry budget toward dead-letter).
@@ -293,7 +293,7 @@ async function rollupSearch(searchId) {
   if (search.control?.desired === 'stopped') status = 'failed'; // treated as stopped/ended
   else if (search.control?.desired === 'paused') status = 'paused';
   else if (total > 0 && remaining === 0) status = 'completed';
-  // A started search whose buckets were all cross-search-deduped has zero tasks —
+  // A started search whose buckets were all cross-search-deduped has zero tasks -
   // its work is already done elsewhere, so complete it (otherwise it hangs forever).
   else if (total === 0 && search.control?.desired === 'run' && search.status === 'in_progress') {
     status = 'completed';
@@ -358,7 +358,7 @@ async function pauseSearch(searchId) {
 
 async function resumeSearch(searchId) {
   await DeepSearch.updateOne({ _id: searchId }, { $set: { 'control.desired': 'run', status: 'in_progress' } });
-  // Release queued work back to agents. 'failed' is included defensively — the agent path
+  // Release queued work back to agents. 'failed' is included defensively - the agent path
   // normally produces only pending/dead, but a retryable failure must never be stranded.
   // Actively-leased tasks are left alone: any with an expired lease are reclaimed to 'pending'
   // by the reaper/claimTask (desired === 'run' now); 'canceled'/'dead' stay terminal.
@@ -410,7 +410,7 @@ async function retryTask(taskId) {
 
 /**
  * Set a task's status (hold/cancel/…). Bumps leaseEpoch and clears the lease so that ANY
- * current owner is fenced out — this is what makes Hold/Cancel work on a LEASED (in-flight)
+ * current owner is fenced out - this is what makes Hold/Cancel work on a LEASED (in-flight)
  * task: the agent's next renewLease fails (epoch/status mismatch) → it aborts the task and
  * its completeTask becomes a no-op, so the new status sticks.
  */

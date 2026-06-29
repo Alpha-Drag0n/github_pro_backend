@@ -76,7 +76,7 @@ class ContactPatternExtractor {
     harvest(text);
 
     // 2. Deobfuscate common deliberate obfuscation, then harvest again.
-    //    Only unambiguous bracketed/entity forms are replaced (safe — won't mangle prose):
+    //    Only unambiguous bracketed/entity forms are replaced (safe - won't mangle prose):
     //    "name [at] domain [dot] com", "name(at)domain(dot)com", "name&#64;domain&#46;com"
     const deobfuscated = text
       .replace(/\s*(?:\[\s*at\s*\]|\(\s*at\s*\)|\{\s*at\s*\}|&#0*64;|&commat;)\s*/gi, '@')
@@ -224,7 +224,7 @@ class ContactPatternExtractor {
       telegramHandles.push(match[1].replace(/^@/, ''));
     }
 
-    // Pattern 2: Telegram prefix — telegram: username, tg: @username
+    // Pattern 2: Telegram prefix - telegram: username, tg: @username
     // (A bare "@username" is NOT treated as Telegram: in a README it is almost always a
     //  GitHub mention, which produced large numbers of false positives.)
     const pattern2 = /(?:telegram|tg)\s*[:=]?\s*@?([a-zA-Z0-9_]{5,32})/gi;
@@ -328,7 +328,7 @@ class ContactPatternExtractor {
       }
     }
 
-    // Pattern 3: explicit context — "twitter: @handle", "x: handle", "𝕏 @handle"
+    // Pattern 3: explicit context - "twitter: @handle", "x: handle", "𝕏 @handle"
     // (A bare "@handle" is NOT treated as Twitter/X: in a README it is almost always a
     //  GitHub mention or an npm scope, which produced large numbers of false positives.)
     const pattern3 = /(?:twitter|x)\s*[:=]\s*@?([a-zA-Z0-9_]{1,15})\b/gi;

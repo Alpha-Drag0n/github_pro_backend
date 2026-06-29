@@ -4,7 +4,7 @@
  * =================
  * A standalone, SINGLE-CONNECTION tool that evacuates data from the online
  * (Atlas) database to local JSON files, then deletes the exported documents
- * from online — keeping the 512 MB free-tier cluster from filling up.
+ * from online - keeping the 512 MB free-tier cluster from filling up.
  *
  * It connects ONLY to the online DB. It does NOT touch your local DB; you
  * import the produced files into local Mongo yourself (MongoDB Compass →
@@ -12,7 +12,7 @@
  *
  * TWO PASSES
  *   1. Telemetry pass (safe any time, append-only collections):
- *        spans, events           [logs is EXCLUDED by default — it is a Quick
+ *        spans, events           [logs is EXCLUDED by default - it is a Quick
  *                                 Search dedup ledger, not telemetry; opt in
  *                                 with --telemetry spans,events,logs only if
  *                                 you never run Quick Search]
@@ -196,7 +196,7 @@ async function drainCollection(coll, base, filter, ctx) {
     if (opts.verify && !verifyPart(finalPath, docs, opts.verifyMaxBytes)) {
       const bad = finalPath.replace(/\.json$/, '.UNVERIFIED.json');
       try { fs.renameSync(finalPath, bad); } catch { /* ignore */ }
-      console.error(`    ! VERIFY FAILED ${path.basename(finalPath)} — NOT deleted from online; quarantined as ${path.basename(bad)}`);
+      console.error(`    ! VERIFY FAILED ${path.basename(finalPath)} - NOT deleted from online; quarantined as ${path.basename(bad)}`);
       appendManifest(dir, {
         ts: new Date().toISOString(), collection: coll.collectionName,
         file: path.basename(bad), docs, deleted: 0, verifyFailed: true,
@@ -225,7 +225,7 @@ async function drainCollection(coll, base, filter, ctx) {
 
   for await (const doc of cursor) {
     if (!stream) await openPart();
-    // bson EJSON.stringify(value, replacer, space, options) — space (3rd arg) controls indent.
+    // bson EJSON.stringify(value, replacer, space, options) - space (3rd arg) controls indent.
     const ejson = EJSON.stringify(doc, undefined, opts.pretty ? 2 : 0, { relaxed: true });
     const line = (first ? '' : ',\n') + ejson;
     await write(line);
@@ -299,7 +299,7 @@ async function main() {
     telemetry = a.telemetry.split(',').map((s) => s.trim()).filter(Boolean);
     const bad = telemetry.filter((c) => !ALLOWED_TELEMETRY.includes(c));
     if (bad.length) { console.error(`ERROR: --telemetry only allows ${ALLOWED_TELEMETRY.join(',')}; got: ${bad}`); process.exit(1); }
-    if (telemetry.includes('logs')) console.warn('WARNING: draining "logs" — only safe if you NEVER run Quick Search (it is a dedup ledger).');
+    if (telemetry.includes('logs')) console.warn('WARNING: draining "logs" - only safe if you NEVER run Quick Search (it is a dedup ledger).');
   }
 
   const opts = {
@@ -322,7 +322,7 @@ async function main() {
 
   let stopping = false;
   const ctxFor = () => ({ dir: ensureDayDir(outBase), opts });
-  process.on('SIGINT', () => { console.log('\nSIGINT — finishing, will stop after this run.'); stopping = true; });
+  process.on('SIGINT', () => { console.log('\nSIGINT - finishing, will stop after this run.'); stopping = true; });
 
   // serverSelectionTimeoutMS keeps a down-network op from hanging the default 30s before it throws.
   const client = new MongoClient(uri, { serverSelectionTimeoutMS: 20000 });
@@ -334,7 +334,7 @@ async function main() {
     catch (e) {
       if (!a.watch) throw e; // one-shot: fail fast as before
       if (stopping) { await client.close().catch(() => {}); return; }
-      console.error(`Connect failed (${isConnectionError(e) ? 'connection' : 'error'}): ${e.message} — retrying in ${Math.round(backoff / 1000)}s`);
+      console.error(`Connect failed (${isConnectionError(e) ? 'connection' : 'error'}): ${e.message} - retrying in ${Math.round(backoff / 1000)}s`);
       await sleep(backoff, () => stopping);
       backoff = Math.min(backoff * 2, retryCapMs);
     }
@@ -357,7 +357,7 @@ async function main() {
       await runOnce(db, ctxFor());
     } catch (e) {
       failed = true;
-      console.error(`Run failed (${isConnectionError(e) ? 'connection' : 'error'}): ${e.message} — retrying in ${Math.round(backoff / 1000)}s`);
+      console.error(`Run failed (${isConnectionError(e) ? 'connection' : 'error'}): ${e.message} - retrying in ${Math.round(backoff / 1000)}s`);
     }
     if (stopping) break;
     if (failed) {

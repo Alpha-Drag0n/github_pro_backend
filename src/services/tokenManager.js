@@ -190,7 +190,7 @@ class TokenManager {
     const results = [];
 
     // Load tokens straight from the DB. The route instantiates a fresh TokenManager and
-    // never calls initialize(), so this.tokens would be empty here — which is why the
+    // never calls initialize(), so this.tokens would be empty here - which is why the
     // endpoint reported "checked 0 tokens". Querying directly makes the check stateless.
     this.tokens = await Token.find({});
 

@@ -1,10 +1,10 @@
 /**
- * Bucket Ledger — enforces "each (day, term) bucket is processed once across ALL
+ * Bucket Ledger - enforces "each (day, term) bucket is processed once across ALL
  * deep searches". When a task finishes, its globalKey is upserted here; task
  * generation for any other search skips keys already present.
  *
  * Tradeoff (by design): a bucket finished by search A is NOT re-run for search B,
- * so B's results won't include users that only A's shared bucket found — this is
+ * so B's results won't include users that only A's shared bucket found - this is
  * the intentional resource-saving dedup.
  */
 

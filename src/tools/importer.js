@@ -3,7 +3,7 @@
  * Local-DB Importer
  * =================
  * Imports the JSON files produced by drainer.js into your LOCAL MongoDB,
- * preserving every value EXACTLY — `_id` (ObjectId), Date fields, etc. are
+ * preserving every value EXACTLY - `_id` (ObjectId), Date fields, etc. are
  * kept byte-for-byte, NOT regenerated or turned into strings.
  *
  * Connects to the LOCAL db ONLY. The companion to drainer.js (which is online-only).
@@ -14,7 +14,7 @@
  *   real ObjectId and $date back into a real Date. We then upsert each doc keyed on
  *   its own _id, so existing _ids match and nothing is regenerated. Re-running is
  *   idempotent (a re-exported duplicate just replaces itself).
- *   (JSON.parse would leave _id as a plain {$oid} object and corrupt it — we don't use it.)
+ *   (JSON.parse would leave _id as a plain {$oid} object and corrupt it - we don't use it.)
  *
  * USAGE
  *   node src/tools/importer.js --dir ../data/2026.06.19
@@ -23,12 +23,12 @@
  *
  * FLAGS
  *   --uri <str>     Local connection string (or env LOCAL_MONGODB_URI / MONGODB_URI).
- *                   Default: mongodb://localhost:27018/github-user-research
+ *                   Default: mongodb://localhost:27017/github-user-research
  *   --db <name>     Database name (default: the db in the URI).
  *   --dir <dir>     Import every D_*.json in this folder.
  *   --file <path>   Import a single file (overrides --dir).
  *   --collection <n> Force target collection (else derived from the filename).
- *   --mode <m>      upsert | insert   (default upsert — idempotent, preserves _id)
+ *   --mode <m>      upsert | insert   (default upsert - idempotent, preserves _id)
  *   --batch <n>     Bulk write size (default 1000).
  *   --dry-run       Parse + count only; write nothing.
  */
@@ -108,7 +108,7 @@ async function importFile(db, file, opts) {
 async function main() {
   const a = parseArgs(process.argv.slice(2));
   const uri = a.uri || process.env.LOCAL_MONGODB_URI || process.env.MONGODB_URI
-    || 'mongodb://localhost:27018/github-user-research';
+    || 'mongodb://localhost:27017/github-user-research';
 
   const opts = {
     collection: a.collection || null,

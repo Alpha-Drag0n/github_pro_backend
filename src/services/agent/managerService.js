@@ -1,5 +1,5 @@
 /**
- * Manager service — the control-plane background loops.
+ * Manager service - the control-plane background loops.
  *
  * - reaper: reclaim expired task leases + mark dead agents (self-healing).
  * - rollup: recompute each active search's progress from its tasks (source of
