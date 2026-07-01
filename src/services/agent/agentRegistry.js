@@ -14,12 +14,17 @@ const { DEAD_AGENT_MS } = require('./agentConfig');
 /** Register (or re-register) an agent. Returns the agent doc. */
 async function register({ agentId, host, pid, version, capabilities, instanceId }) {
   const now = new Date();
+  const set = { host, pid, version, capabilities, instanceId, status: 'idle', lastHeartbeat: now };
+  // Auto-capture the public Render URL (set for web services) so the fleet knows how to wake
+  // this agent after it sleeps. Refreshed on every deploy; a manual override via PATCH persists
+  // only while RENDER_EXTERNAL_URL is unset (i.e. off Render), which is the intended behavior.
+  if (process.env.RENDER_EXTERNAL_URL) set.renderUrl = process.env.RENDER_EXTERNAL_URL;
   const agent = await Agent.findOneAndUpdate(
     { agentId },
     {
       // instanceId is set on EVERY (re)register: a newer deploy claiming the same agentId
       // overwrites it, which is how the older instance learns it has been superseded.
-      $set: { host, pid, version, capabilities, instanceId, status: 'idle', lastHeartbeat: now },
+      $set: set,
       // Initialize the control channel ONLY on first insert - a re-register (restart/
       // reconnect with a reused agentId) must not clobber a pending manager command.
       $setOnInsert: {
@@ -94,6 +99,45 @@ async function markStopped(agentId) {
 }
 
 /**
+ * Set (or clear, when name is empty) an agent's unique display name.
+ * Throws a tagged error on collision so the route can answer 409.
+ */
+async function setName(agentId, rawName) {
+  const name = rawName == null ? null : String(rawName).trim();
+  if (name) {
+    const clash = await Agent.findOne({ name, agentId: { $ne: agentId } }).select('_id');
+    if (clash) {
+      const err = new Error(`name "${name}" is already taken`);
+      err.code = 'NAME_TAKEN';
+      throw err;
+    }
+  }
+  try {
+    const agent = await Agent.findOneAndUpdate(
+      { agentId },
+      { $set: { name: name || null } },
+      { new: true }
+    );
+    await events.emit({ type: 'agent.control', agentId, message: name ? `named "${name}"` : 'name cleared' });
+    return agent;
+  } catch (e) {
+    // Race with the partial unique index (two set-name calls at once) -> normalize to NAME_TAKEN.
+    if (e && e.code === 11000) {
+      const err = new Error(`name "${name}" is already taken`);
+      err.code = 'NAME_TAKEN';
+      throw err;
+    }
+    throw e;
+  }
+}
+
+/** Manually set/override the wake URL (used off-Render, or to correct an auto-captured value). */
+async function setRenderUrl(agentId, rawUrl) {
+  const renderUrl = rawUrl ? String(rawUrl).trim().replace(/\/+$/, '') : null;
+  return Agent.findOneAndUpdate({ agentId }, { $set: { renderUrl } }, { new: true });
+}
+
+/**
  * Mark agents silent for too long as `dead`. Their leased tasks are reclaimed
  * separately by the task reaper (lease expiry). Returns the number marked.
  */
@@ -124,5 +168,7 @@ module.exports = {
   setControl,
   clearControl,
   markStopped,
+  setName,
+  setRenderUrl,
   reapDeadAgents,
 };

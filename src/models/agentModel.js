@@ -18,6 +18,16 @@ const agentSchema = new mongoose.Schema(
     // `${RENDER_SERVICE_ID}-${ordinal}`. The agent record is upserted on this key.
     agentId: { type: String, required: true, unique: true },
 
+    // Human-friendly display name, unique across the fleet (see the partial unique index
+    // below - null/absent is allowed for many agents, but any two set names must differ).
+    // The UI shows `name || agentId` everywhere; this is purely cosmetic identity.
+    name: { type: String, default: null, trim: true },
+
+    // Public Render URL for this agent's web service (auto-captured from RENDER_EXTERNAL_URL
+    // on register, manually overridable). Hitting it wakes a spun-down free-tier instance,
+    // which is how `sleeping` agents are brought back (see POST /agents/:id/wake).
+    renderUrl: { type: String, default: null },
+
     // Unique per process boot (RENDER_INSTANCE_ID, else host:pid). A newer deploy registering
     // with the SAME agentId overwrites this; the older instance sees the mismatch and self-drains.
     instanceId: { type: String, default: null },
@@ -26,9 +36,12 @@ const agentSchema = new mongoose.Schema(
     pid: Number,
     version: String,
 
+    // `sleeping` is an INTENTIONAL rest state: the agent stopped its self keep-alive so
+    // Render idle-suspends the instance. Unlike `dead` (missed heartbeats), the reaper
+    // leaves `sleeping` agents alone - they are woken on demand via their renderUrl.
     status: {
       type: String,
-      enum: ['starting', 'idle', 'busy', 'paused', 'draining', 'stopped', 'dead'],
+      enum: ['starting', 'idle', 'busy', 'paused', 'draining', 'sleeping', 'stopped', 'dead'],
       default: 'starting',
       index: true,
     },
@@ -71,6 +84,14 @@ const agentSchema = new mongoose.Schema(
     lastError: { message: String, at: Date },
   },
   { timestamps: true }
+);
+
+// Unique display name, but ONLY among agents that actually have one - a partial index so
+// the many agents with name=null don't collide with each other (a plain unique index would
+// reject all-but-one null). Any two STRING names must differ.
+agentSchema.index(
+  { name: 1 },
+  { unique: true, partialFilterExpression: { name: { $type: 'string' } } }
 );
 
 module.exports = mongoose.model('Agent', agentSchema);

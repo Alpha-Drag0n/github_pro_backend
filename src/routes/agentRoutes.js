@@ -12,6 +12,7 @@ const Task = require('../models/taskModel');
 const Event = require('../models/eventModel');
 const taskQueue = require('../services/agent/taskQueue');
 const agentRegistry = require('../services/agent/agentRegistry');
+const { pingHealth } = require('../services/keepAlive');
 const Logger = require('../utils/logger');
 
 const logger = new Logger();
@@ -84,11 +85,57 @@ router.get('/agent-events', wrap(async (req, res) => {
 
 router.post('/agents/:agentId/control', wrap(async (req, res) => {
   const { command, assignTaskId } = req.body;
-  if (!['run', 'pause', 'drain', 'stop', 'preempt'].includes(command)) {
+  if (!['run', 'pause', 'drain', 'stop', 'preempt', 'sleep'].includes(command)) {
     return res.status(400).json({ error: 'Invalid command' });
   }
   await agentRegistry.setControl(req.params.agentId, command, assignTaskId || null);
   res.json({ ok: true });
+}));
+
+// Rename an agent and/or set its wake URL. name must be unique across the fleet (409 on clash);
+// an empty name clears it (falls back to showing the agentId).
+router.patch('/agents/:agentId', wrap(async (req, res) => {
+  const { name, renderUrl } = req.body;
+  const exists = await Agent.exists({ agentId: req.params.agentId });
+  if (!exists) return res.status(404).json({ error: 'Agent not found' });
+
+  let agent;
+  if (name !== undefined) {
+    try {
+      agent = await agentRegistry.setName(req.params.agentId, name);
+    } catch (e) {
+      if (e.code === 'NAME_TAKEN') return res.status(409).json({ error: e.message });
+      throw e;
+    }
+  }
+  if (renderUrl !== undefined) {
+    agent = await agentRegistry.setRenderUrl(req.params.agentId, renderUrl);
+  }
+  res.json(agent || (await Agent.findOne({ agentId: req.params.agentId })));
+}));
+
+// Wake a sleeping/suspended agent: reset its control to `run` (so the freshly-booted process
+// does not immediately re-sleep on a stale command), then hit its Render URL to boot the
+// idle-suspended web service. The boot can take ~30-60s, so a ping timeout is NOT a failure -
+// the request itself is what triggers Render to spin the instance back up.
+router.post('/agents/:agentId/wake', wrap(async (req, res) => {
+  const agent = await Agent.findOne({ agentId: req.params.agentId }).select('renderUrl');
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  if (!agent.renderUrl) {
+    return res.status(400).json({ error: 'No renderUrl set for this agent. Add one first, then wake.' });
+  }
+  await agentRegistry.setControl(req.params.agentId, 'run');
+  const ping = await pingHealth(agent.renderUrl);
+  res.json({
+    ok: true,
+    triggered: true,
+    url: agent.renderUrl,
+    httpStatus: ping.httpStatus,
+    responseTimeMs: ping.responseTimeMs,
+    note: ping.httpStatus === 200
+      ? 'Agent responded - awake.'
+      : 'Wake request sent. Cold start may take up to a minute before the agent reappears.',
+  });
 }));
 
 /* ---------------- task control ---------------- */
