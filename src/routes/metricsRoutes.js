@@ -294,6 +294,7 @@ router.get('/metrics/agents', wrap(async (req, res) => {
   const now = Date.now();
   res.json(agents.map((a) => ({
     agentId: a.agentId,
+    name: a.name || null,
     status: a.status,
     heartbeatAgeS: a.lastHeartbeat ? Math.round((now - new Date(a.lastHeartbeat).getTime()) / 1000) : 9999,
     tasksDone: (a.metrics && a.metrics.tasksDone) || 0,

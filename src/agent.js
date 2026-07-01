@@ -37,7 +37,10 @@ async function main() {
   const agents = [];
   for (let i = 0; i < count; i++) {
     // Stable per-slot id (`${RENDER_SERVICE_ID}-${i}`) so redeploys reuse the agent record.
-    agents.push(await startAgent({ ordinal: i }));
+    // ownsProcess only when this process hosts a single agent: a `sleep` command may then
+    // stop the process-wide keep-alive and let Render suspend the instance. With AGENT_COUNT>1
+    // the agents share one keep-alive, so none is allowed to switch it off unilaterally.
+    agents.push(await startAgent({ ordinal: i, ownsProcess: count === 1 }));
   }
   logger.info(`Started ${agents.length} agent(s) in this process`);
 

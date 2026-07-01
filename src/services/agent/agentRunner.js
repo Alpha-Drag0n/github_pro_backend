@@ -15,6 +15,7 @@ const agentRegistry = require('./agentRegistry');
 const taskQueue = require('./taskQueue');
 const deepSearchBucketHandler = require('./handlers/deepSearchBucketHandler');
 const tracing = require('../observability/tracing');
+const { startSelfKeepAlive, stopSelfKeepAlive } = require('../keepAlive');
 const { HEARTBEAT_MS, CLAIM_IDLE_BACKOFF_MS, MAX_TASK_MS } = require('./agentConfig');
 
 const logger = new Logger();
@@ -26,10 +27,14 @@ function sleep(ms) {
 
 /**
  * Start an agent. Returns { agentId, stop() }.
- * @param {object} [opts] { agentId, ordinal, instanceId, capabilities }
+ * @param {object} [opts] { agentId, ordinal, instanceId, capabilities, ownsProcess }
  *   Identity is STABLE across redeploys: agentId wins, else
  *   `${RENDER_SERVICE_ID || AGENT_NAME || host}-${ordinal ?? pid}`, so the same logical
  *   agent slot reuses its record instead of creating a new one on every deploy.
+ *   ownsProcess=true means this agent is the sole tenant of its process (a standalone
+ *   `npm run agent` service), so a `sleep` command may stop the process-wide self keep-alive
+ *   and let Render idle-suspend the instance. For in-process agents (inside the API server)
+ *   it stays false so `sleep` never takes the shared web service offline.
  */
 async function startAgent(opts = {}) {
   const capabilities = opts.capabilities || Object.keys(HANDLERS);
@@ -37,17 +42,21 @@ async function startAgent(opts = {}) {
   const agentId = opts.agentId || `${base}-${opts.ordinal != null ? opts.ordinal : process.pid}`;
   // Unique per process boot. A newer deploy registering the SAME agentId supersedes this one.
   const instanceId = opts.instanceId || process.env.RENDER_INSTANCE_ID || `${os.hostname()}:${process.pid}`;
+  const ownsProcess = opts.ownsProcess === true;
 
   let stopped = false;
   let currentTask = null;
   let leaseLost = false;
   let superseded = false;
+  let keepAliveOff = false; // did we stop the self keep-alive for a `sleep` command?
   let control = { command: 'run', assignTaskId: null };
   const metricsInc = {}; // buffered, flushed on heartbeat
 
   // The status the agent should report given its current command + work.
   const statusFor = () =>
-    control.command === 'pause'
+    control.command === 'sleep'
+      ? 'sleeping'
+      : control.command === 'pause'
       ? 'paused'
       : control.command === 'drain'
       ? 'draining'
@@ -214,6 +223,27 @@ async function startAgent(opts = {}) {
           break;
         }
         if (control.command === 'stop') break;
+
+        // `sleep`: an intentional rest. Stop the self keep-alive (only when we own the
+        // process, so an in-process agent never takes the API server offline) so Render
+        // idle-suspends this instance; it is woken again by hitting its renderUrl. Fully
+        // reversible - any non-sleep command restarts the keep-alive. The current task, if
+        // any, has already finished by the time we reach the top of the loop, so no work is lost.
+        if (ownsProcess) {
+          if (control.command === 'sleep' && !keepAliveOff) {
+            stopSelfKeepAlive();
+            keepAliveOff = true;
+            logger.info(`[agent ${agentId}] sleeping - self keep-alive stopped; Render will suspend on idle`);
+          } else if (control.command !== 'sleep' && keepAliveOff) {
+            startSelfKeepAlive();
+            keepAliveOff = false;
+            logger.info(`[agent ${agentId}] awake - self keep-alive restarted`);
+          }
+        }
+        if (control.command === 'sleep') {
+          await sleep(CLAIM_IDLE_BACKOFF_MS);
+          continue;
+        }
         if (control.command === 'pause') {
           await sleep(CLAIM_IDLE_BACKOFF_MS);
           continue;
